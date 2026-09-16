@@ -1,6 +1,43 @@
 [package]
-name = "quadrille"
-version = "0.1.0"
-edition = "2024"
+name          = "quadrille"
+version       = "0.0.0"
+edition        = "2024"
+rust-version   = "1.85"
+description    = "Terminal spreadsheet for very large CSV files and xlsx/ods workbooks, with a complete CLI and MCP API."
+license        = "MIT OR Apache-2.0"
+repository     = "https://github.com/svenvarkel/quadrille"
+homepage       = "https://quadrille.dev"
+readme         = "README.md"
+keywords       = ["csv", "spreadsheet", "tui", "cli", "mcp"]
+categories     = ["command-line-utilities", "text-processing"]
+
+# Keep the published tarball to source only. Everything not listed is excluded,
+# so test corpora and benchmark fixtures never end up in the package.
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[[bin]]
+name = "qd"
+path = "src/main.rs"
 
 [dependencies]
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = true
+
+# Benchmarks and property tests run in release-ish conditions but need unwinding
+# and debug symbols, so they get their own profile rather than fighting the above.
+[profile.bench]
+inherits = "release"
+panic    = "unwind"
+debug    = true
+strip    = false
