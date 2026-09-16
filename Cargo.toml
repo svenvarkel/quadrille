@@ -14,11 +14,11 @@ categories     = ["command-line-utilities", "text-processing"]
 # Keep the published tarball to source only. Everything not listed is excluded,
 # so test corpora and benchmark fixtures never end up in the package.
 include = [
-    "src/**/*.rs",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
+    "/src",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
 ]
 
 [[bin]]

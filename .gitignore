@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# benchmark + corpus artefacts (spec §9.1) — never commit test data
+/bench/*.csv
+/tests/corpus/*.big
+/docs/BENCH.local.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
