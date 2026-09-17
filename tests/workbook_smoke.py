@@ -108,9 +108,9 @@ def main():
             dest = root / f'edited.{ext}'
             edits = ['--set', 'C2', changed, '--set', 'B2', '00100', '--set', 'B4', 'literal =1+1', '--set', 'C3', '']
             if ext == 'xlsx':
-                edits += ['--set', 'E2', '=SUM(B2:B3)']
-                preview = qd(source, '--set', 'E2', '=SUM(B2:B3)', '--dry-run', '--read', 'E2')
-                assert preview['rows'] == [['=SUM(B2:B3)']] and preview['formulas']['E2'] == 'SUM(B2:B3)'
+                edits += ['--set', 'G2', '=SUM(B2:B3)']
+                preview = qd(source, '--set', 'G2', '=SUM(B2:B3)', '--dry-run', '--read', 'G2')
+                assert preview['rows'] == [['=SUM(B2:B3)']] and preview['formulas']['G2'] == 'SUM(B2:B3)'
             qd(source, *edits, '--output', dest)
             assert source.read_bytes() == original
             assert qd(dest, '--read', 'B2:C2')['rows'] == [['00100', changed]]
@@ -118,10 +118,9 @@ def main():
             assert qd(dest, '--read', 'C3')['rows'] == [['']]
             assert qd(dest, '--read', formula_at)['formulas'] == result['formulas']
             if ext == 'xlsx':
-                created = qd(dest, '--read', 'E2')
-                assert created['rows'] == [['']] and created['formulas']['E2'] == 'SUM(B2:B3)'
+                created = qd(dest, '--read', 'G2')
+                assert created['rows'] == [['']] and created['formulas']['G2'] == 'SUM(B2:B3)'
             qd(source, *edits, '--output', dest, ok=False)
-            qd(source, *edits, '--output', source, ok=False)
             qd(source, '--output', root / 'bad.ods' if ext == 'xlsx' else root / 'bad.xlsx', ok=False)
             with ZipFile(dest) as z:
                 changed_part = 'xl/worksheets/sheet1.xml' if ext == 'xlsx' else 'content.xml'
@@ -132,9 +131,9 @@ def main():
                 if ext == 'xlsx':
                     b2 = edited_xml.find(f'.//{{{X}}}c[@r="B2"]')
                     assert b2.attrib['s'] == '1' and b2.attrib['t'] == 'inlineStr'
-                    e2 = edited_xml.find(f'.//{{{X}}}c[@r="E2"]')
-                    assert e2.find(f'{{{X}}}f').text == 'SUM(B2:B3)' and e2.find(f'{{{X}}}v') is None
-                    assert edited_xml.find(f'{{{X}}}dimension').attrib['ref'] == 'A1:E5'
+                    g2 = edited_xml.find(f'.//{{{X}}}c[@r="G2"]')
+                    assert g2.find(f'{{{X}}}f').text == 'SUM(B2:B3)' and g2.find(f'{{{X}}}v') is None
+                    assert edited_xml.find(f'{{{X}}}dimension').attrib['ref'] == 'A1:G5'
                     assert edited_xml.find(f'.//{{{X}}}autoFilter').attrib['ref'] == 'A1:D5'
                 else:
                     assert z.infolist()[0].filename == 'mimetype' and z.infolist()[0].compress_type == ZIP_STORED
@@ -162,6 +161,10 @@ def main():
             twice = root / f'twice.{ext}'
             qd(dest, '--set', 'C2', 'second edit', '--output', twice)
             assert qd(twice, '--read', 'C2')['rows'] == [['second edit']]
+            in_place = root / f'in-place.{ext}'
+            in_place.write_bytes(original)
+            qd(in_place, '--set', 'C2', 'in place', '--output', in_place)
+            assert qd(in_place, '--read', 'C2')['rows'] == [['in place']]
             assert source.read_bytes() == original
         # Formula/merge protection and oversized sparse dimensions must fail before publishing.
         protected = root / 'merged.xlsx'
@@ -181,7 +184,7 @@ def main():
         entries['content.xml'] = entries['content.xml'].replace('table:number-columns-repeated="2"', 'table:number-columns-repeated="2" table:number-columns-spanned="2"')
         pack(special, entries)
         qd(special, '--set', 'C2', 'bad', '--dry-run', ok=False)
-        print('Workbook smoke PASS: XLSX/ODS sheets, coordinates, formulas, edits, blanks, repeats, styles, untouched parts, CSV sorting/export, no-clobber, failed batches')
+        print('Workbook smoke PASS: XLSX/ODS sheets, coordinates, formulas, edits, blanks, repeats, styles, untouched parts, in-place save, CSV sorting/export, no-clobber, failed batches')
 
 
 if __name__ == '__main__':

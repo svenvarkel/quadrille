@@ -500,6 +500,9 @@ impl Workbook {
     }
 
     pub fn validate_edit(&self, row: u64, col: usize, value: &str) -> Result<()> {
+        if self.format == "XLSX" {
+            check_size(row + 1, col as u64 + 1)?;
+        }
         if self.formulas.contains_key(&(row, col))
             || self
                 .protected
@@ -602,7 +605,11 @@ impl Workbook {
         }
         self.check_source()?;
         temp.as_file().sync_all()?;
-        temp.persist_noclobber(destination)?;
+        if destination == self.source {
+            temp.persist(destination)?;
+        } else {
+            temp.persist_noclobber(destination)?;
+        }
         Ok(())
     }
 }

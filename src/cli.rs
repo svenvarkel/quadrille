@@ -27,7 +27,7 @@ Without headless options, opens the terminal UI.
       --sort B,-D:n     Sort B ascending as text, D descending numerically
       --no-header       Include the first record in sorting (default: keep it)
       --dry-run         Preview edits/sort as JSON without writing a file
-  -o, --output FILE     Save to a new file; existing paths are never overwritten
+  -o, --output FILE     Save to FILE; the input itself may be replaced
   -h, --help            Show this help
 
 Examples:
@@ -49,7 +49,7 @@ q / Ctrl+Q quit. In an editor: Ctrl+A select all, Ctrl+J insert newline.
 
 Workbooks: --sheet selects one sheet; --sheets lists them. Values are read as
 text. In XLSX, edits beginning with = create formulas; existing formulas are
-read-only, with cached results only. One new trailing XLSX column can be edited.
+read-only, with cached results only. Unused XLSX columns can be edited.
 Native saves preserve other sheets/styles and require source row order.
 Use a .csv destination to export the selected sheet, including a sorted view.
 

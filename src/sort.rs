@@ -271,13 +271,10 @@ pub(crate) fn write_sorted(
             }
             let mut values: Vec<_> = record.iter().map(str::to_owned).collect();
             for (&(_, column), value) in changed {
-                if column == values.len() {
-                    values.push(value.clone());
-                } else {
-                    *values
-                        .get_mut(column)
-                        .ok_or("Missing edited column during save")? = value.clone();
+                if column >= values.len() {
+                    values.resize(column + 1, String::new());
                 }
+                values[column] = value.clone();
             }
             let mut writer = csv::WriterBuilder::new()
                 .delimiter(delimiter)

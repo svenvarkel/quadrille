@@ -47,6 +47,17 @@ with tempfile.TemporaryDirectory(prefix='quadrille-workbook-tui-') as tmp:
             result = subprocess.run([binary, str(path), '--sheet', sheet, '--read', cell], capture_output=True, check=True)
             return json.loads(result.stdout)['rows'][0][0]
 
+        def wait_read(path, sheet, cell, expected):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                collect()
+                try:
+                    if read(path, sheet, cell) == expected:
+                        return
+                except subprocess.CalledProcessError:
+                    pass
+            assert read(path, sheet, cell) == expected
+
         try:
             deadline = time.monotonic() + 5
             while b'00123' not in output and time.monotonic() < deadline and process.poll() is None:
@@ -82,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='quadrille-workbook-tui-') as tmp:
             send(b'\x1b[B\x1b[C\x1b[C\r')  # C2
             send(b'Changed data\r')
             if ext == 'xlsx':
-                send(b'\x1b[C\x1b[C\r')  # New trailing cell E2.
+                send(b'\x1b[C\x1b[C\x1b[C\x1b[C\r')  # Skip empty columns to G2.
                 send(b'=SUM(B2:B3)\r')
             send(b'\x13\r')
             saved3 = saved2.with_name(f'notes-edited.edited.{ext}')
@@ -93,14 +104,23 @@ with tempfile.TemporaryDirectory(prefix='quadrille-workbook-tui-') as tmp:
             assert read(saved3, 'Notes õ', 'B3') == 'Changed note'
             if ext == 'xlsx':
                 formula = subprocess.run(
-                    [binary, str(saved3), '--sheet', 'Data', '--read', 'E2'],
+                    [binary, str(saved3), '--sheet', 'Data', '--read', 'G2'],
                     capture_output=True, check=True)
-                assert json.loads(formula.stdout)['formulas']['E2'] == 'SUM(B2:B3)'
+                assert json.loads(formula.stdout)['formulas']['G2'] == 'SUM(B2:B3)'
+            send(b'\x13')
+            send(b'\x01' + str(saved2).encode() + b'\r')  # Replace the open source.
+            wait_read(saved2, 'Data', 'C2', 'Changed data')
+            if ext == 'xlsx':
+                send(b'\x1b[D\x1b[D\x1b[D\x1b[D')  # G2 back to C2 after reload.
+            send(b'\rAfter reload\r')
+            send(b'\x13')
+            send(b'\x01' + str(saved2).encode() + b'\r')
+            wait_read(saved2, 'Data', 'C2', 'After reload')
             assert source.read_bytes() == original
             send(b'q')
             assert process.wait(timeout=3) == 0
             assert b'\x1b[?1006l' in output and b'\x1b[?1049l' in output
-            print(ext, 'PTY PASS: sheets, edit, undo, byte-identical copy, unsaved guard, save, switch with retained edits, clean exit')
+            print(ext, 'PTY PASS: sheets, edit, undo, save, source replacement/reload, switch with retained edits, clean exit')
         finally:
             if process.poll() is None:
                 process.kill()

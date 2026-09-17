@@ -175,6 +175,10 @@ impl Sheet {
         self.workbook.as_ref().map_or("CSV", |w| w.format.as_str())
     }
 
+    pub fn delimiter(&self) -> u8 {
+        self.delimiter
+    }
+
     pub fn formula(&self, row: u64, col: usize) -> Option<&str> {
         let workbook = self.workbook.as_ref()?;
         let row = self.source_row(row);
@@ -189,14 +193,15 @@ impl Sheet {
     }
 
     pub fn editable_columns(&self, existing: usize) -> usize {
-        existing
-            + usize::from(
-                existing < 16_384
-                    && self
-                        .workbook
-                        .as_ref()
-                        .is_some_and(|workbook| workbook.format == "XLSX"),
-            )
+        if self
+            .workbook
+            .as_ref()
+            .is_some_and(|workbook| workbook.format == "XLSX")
+        {
+            16_384
+        } else {
+            existing
+        }
     }
 
     pub fn cell_value<'a>(
@@ -205,10 +210,9 @@ impl Sheet {
         col: usize,
         record: &'a csv::StringRecord,
     ) -> Option<&'a str> {
-        let original = record.get(col).or_else(|| {
-            (col == record.len() && self.editable_columns(record.len()) > record.len())
-                .then_some("")
-        })?;
+        let original = record
+            .get(col)
+            .or_else(|| (col < self.editable_columns(record.len())).then_some(""))?;
         Some(self.value(row, col, original))
     }
 
@@ -295,10 +299,9 @@ impl Sheet {
         let original = rows
             .first()
             .and_then(|record| {
-                record.get(col).or_else(|| {
-                    (col == record.len() && self.editable_columns(record.len()) > record.len())
-                        .then_some("")
-                })
+                record
+                    .get(col)
+                    .or_else(|| (col < self.editable_columns(record.len())).then_some(""))
             })
             .ok_or("No cell at this position")?;
         if self.value(row, col, original) == value {
@@ -331,7 +334,7 @@ impl Sheet {
         true
     }
 
-    /// Save a snapshot to a new destination. Existing paths are never replaced.
+    /// Save a snapshot. The source itself may be atomically replaced.
     pub fn save_as(&self, destination: &Path) -> Result<SaveJob> {
         let index = self.index.lock().unwrap();
         if let Some(error) = &index.error {
@@ -348,9 +351,14 @@ impl Sheet {
                 "CSV to workbook conversion is not supported; use a CSV destination".into(),
             );
         }
-        if destination.try_exists()? {
-            return Err("Destination already exists; choose a new filename".into());
-        }
+        let destination = if destination.try_exists()? {
+            if fs::canonicalize(destination)? != self.path {
+                return Err("Destination already exists; choose a new filename".into());
+            }
+            self.path.clone()
+        } else {
+            destination.to_path_buf()
+        };
         let parent = destination
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -362,7 +370,7 @@ impl Sheet {
             self.delimiter,
             index.offsets.clone(),
             self.edits.clone(),
-            destination.to_path_buf(),
+            destination,
         );
         let bytes = Arc::new(AtomicU64::new(0));
         let progress = bytes.clone();
@@ -477,13 +485,12 @@ fn save(
                 if next_row != row {
                     break;
                 }
-                if col == values.len() && workbook.is_some() {
-                    values.push(value.clone());
-                } else {
-                    *values
-                        .get_mut(col)
-                        .ok_or("Edited column no longer exists")? = value.clone();
+                if col >= values.len() && workbook.is_some() {
+                    values.resize(col + 1, String::new());
                 }
+                *values
+                    .get_mut(col)
+                    .ok_or("Edited column no longer exists")? = value.clone();
                 edits.next();
             }
             copy_bytes(&mut input, &mut output, start - cursor, progress)?;
@@ -532,7 +539,11 @@ fn save(
     if let Some(w) = workbook {
         w.check_source()?;
     }
-    temp.persist_noclobber(destination)?;
+    if destination == path {
+        temp.persist(destination)?;
+    } else {
+        temp.persist_noclobber(destination)?;
+    }
     Ok(())
 }
 
@@ -612,12 +623,23 @@ mod tests {
             assert_eq!(&records[2][2], "");
             assert!(written.starts_with(&bytes[..bytes.iter().position(|&b| b == b'\n').unwrap() + 1]));
             assert_eq!(fs::read(&source).unwrap(), bytes);
-            assert!(sheet.save_as(&source).is_err());
             assert!(sheet.save_as(&out).is_err());
             assert!(sheet.undo()); assert!(sheet.undo()); assert!(sheet.undo());
             assert_eq!(sheet.edit_count(), 0);
             assert_eq!(saved(&sheet, &dir.path().join(format!("{case}-undo"))), bytes);
         }
+    }
+
+    #[test]
+    fn csv_can_replace_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.csv");
+        fs::write(&source, "id,value\n1,old\n").unwrap();
+        let mut sheet = Sheet::open(&source, b',').unwrap();
+        ready(&sheet);
+        sheet.set(1, 1, "new".into()).unwrap();
+        saved(&sheet, &source);
+        assert_eq!(fs::read_to_string(source).unwrap(), "id,value\n1,new\n");
     }
 
     #[test]

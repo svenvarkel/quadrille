@@ -237,6 +237,32 @@ impl App {
             if let Some(job) = &self.save {
                 match job.result.try_recv() {
                     Ok(Ok(path)) => {
+                        if path == self.sheet.path {
+                            let sheet = Sheet::open_sheet(
+                                &path,
+                                self.sheet.delimiter(),
+                                self.sheet.sheet_name(),
+                            );
+                            self.save = None;
+                            match sheet {
+                                Ok(sheet) => {
+                                    self.sheet = sheet;
+                                    self.rows.clear();
+                                    self.loaded = None;
+                                    self.saved_workbook = Some(path.clone());
+                                    self.unsaved = false;
+                                    self.message = format!("Saved {}", path.display());
+                                    continue;
+                                }
+                                Err(error) => {
+                                    self.message = format!(
+                                        "Saved {}, but reload failed: {error}",
+                                        path.display()
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         if self.sheet.sheet_name().is_some()
                             && path.extension().is_some_and(|e| {
                                 e.to_string_lossy()
@@ -833,7 +859,14 @@ impl App {
                 Cell::from((number + 1).to_string()).style(Style::default().fg(ROW_FG).bg(GRID_BG)),
             ];
             for col in self.left..self.left + columns {
-                let text = self.sheet.cell_value(number, col, record).unwrap_or("");
+                let text = match self.sheet.cell_value(number, col, record) {
+                    Some("") => self
+                        .sheet
+                        .formula(number, col)
+                        .map_or_else(String::new, |formula| format!("={formula}")),
+                    Some(value) => value.to_owned(),
+                    None => String::new(),
+                };
                 let style = if number == self.row && col == self.col {
                     Style::default()
                         .fg(SELECTED_FG)
@@ -847,7 +880,7 @@ impl App {
                 } else {
                     grid
                 };
-                cells.push(Cell::from(safe(text)).style(style));
+                cells.push(Cell::from(safe(&text)).style(style));
             }
             Row::new(cells)
         });
@@ -880,6 +913,8 @@ impl App {
         if let Some(formula) = self.sheet.formula(self.row, self.col) {
             value = if self.sheet.is_edited(self.row, self.col) {
                 format!("={} · calculated when saved file opens", safe(formula))
+            } else if value.is_empty() {
+                format!("={} · no cached result", safe(formula))
             } else {
                 format!("={} · cached: {value}", safe(formula))
             };
@@ -1019,7 +1054,7 @@ const EDITING_HELP: &[&str] = &[
     "EDIT AND SAVE",
     "Enter / F2               Edit selected cell",
     "Ctrl+Z                   Undo last cell edit",
-    "Ctrl+S / F4              Save As (new file only)",
+    "Ctrl+S / F4              Save As (source may be replaced)",
     "Editor: Ctrl+A select all; Ctrl+J newline; Enter apply; Esc cancel",
     "",
     "VALUES",
@@ -1043,7 +1078,7 @@ const WORKBOOK_HELP: &[&str] = &[
     "WORKBOOKS",
     "w                        Choose an XLSX / ODS sheet",
     "Save workbook edits before switching sheets.",
-    "XLSX: move one column past the data and type =… to create a formula.",
+    "XLSX: unused columns are editable; type =… to create a formula.",
     "Excel/LibreOffice calculates new formulas when the saved file opens.",
     "Existing formula cells remain read-only; qd does not recalculate.",
     "Native saves preserve the workbook; clear sorting first. Export views as .csv.",
@@ -1156,7 +1191,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     );
     let title = match prompt.action {
         Action::Edit => " Edit cell · Enter apply · Esc cancel · Ctrl+J newline ",
-        Action::Save => " Save as NEW file · Enter save · Esc cancel ",
+        Action::Save => " Save as file · source may be replaced · Enter save · Esc cancel ",
         Action::Goto => " Go to row (1-based, including header) ",
         Action::Quit => " Discard unsaved changes? y / n ",
         Action::Sort => " Sort columns · Enter apply · Esc cancel ",

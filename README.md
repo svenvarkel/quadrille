@@ -175,9 +175,9 @@ then opens the chosen sheet from that saved copy, retaining previous sheet edits
 CSV export leaves pending workbook edits unsaved.
 
 Cell addresses match the workbook, including leading empty rows and columns.
-Blank cells inside the imported rectangle are editable. XLSX also exposes one empty
-column after the imported rectangle, so a new trailing column can be added. Expanding
-rows, adding sheets, and inserting/deleting rows are not supported.
+Blank cells inside the imported rectangle are editable. XLSX also exposes unused
+columns through XFD, subject to the 5 million cell rectangle limit. Expanding rows,
+adding sheets, and inserting/deleting rows are not supported.
 
 Values are displayed and returned as strings. Numbers use the reader's numeric
 representation; Excel date cells currently show serial values, not formatted dates.
@@ -186,7 +186,8 @@ formula. For example, enter `=SUM(B2:N2)` in column O, then Save As `.xlsx`.
 Existing unedited cell types and number formats remain intact. This version does
 not offer typed numeric/date edits. ODS edits remain literal text.
 
-Formula cells show their cached results; the TUI preview also shows the formula,
+Formula cells show their cached results, or the formula when no cached result exists;
+the TUI preview also shows the formula,
 and CLI `--read` includes a `formulas` map. **qd does not recalculate formulas**;
 cached results may be missing or stale, including after edits to their inputs.
 Existing formula, merged and array-result cells are read-only. New XLSX formulas
@@ -243,8 +244,9 @@ records may change. This is not yet byte-exact preservation of unedited fields
 inside an edited record. With no sort active, an unchanged save or a save after undoing all edits
 produces a byte-identical copy.
 
-After saving, the session still views the original file plus its edits; it does not
-switch to the new file. Further saves need another unused filename.
+Saving over the source atomically replaces and reloads it. Saving elsewhere keeps
+the session on the original file plus its edits; other existing destinations are
+never overwritten.
 
 The source must remain unchanged while open. Length, modification time, and (on
 Unix) file identity are checked, but there is no filesystem snapshot or exclusive
@@ -254,7 +256,7 @@ The underlying `csv` parser is permissive about malformed quoting: `--check` che
 readability and UTF-8, **not** strict RFC 4180 conformance. Use well-formed CSV files
 for this proof of concept.
 
-This version has no formula calculation/editing, filtering, row insertion/deletion,
+This version has no formula calculation, filtering, row insertion/deletion,
 or MCP server. The CLI and TUI use the same editing engine, but separate
 processes do not share a live editing session. Very large individual
 records still require proportional memory, and large pasted edits/undo history
