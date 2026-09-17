@@ -39,8 +39,6 @@ const PANEL_ACCENT: Color = Color::Rgb(134, 226, 255);
 const PANEL_BORDER: Color = Color::Rgb(118, 196, 255);
 const INPUT_BG: Color = Color::Rgb(248, 250, 252);
 const INPUT_FG: Color = Color::Rgb(17, 24, 39);
-const INPUT_SELECTED_BG: Color = Color::Rgb(0, 75, 135);
-const INPUT_SELECTED_FG: Color = Color::Rgb(255, 255, 255);
 
 fn main() {
     if let Err(error) = run() {
@@ -1158,7 +1156,13 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     let block = Block::bordered()
         .style(panel)
         .border_style(Style::default().fg(PANEL_BORDER).bg(PANEL_BG))
-        .title(title);
+        .title(Line::styled(
+            title,
+            Style::default()
+                .fg(PANEL_FG)
+                .bg(PANEL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
@@ -1171,8 +1175,8 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     let input = Style::default().fg(INPUT_FG).bg(INPUT_BG);
     let text = if prompt.select_all {
         Style::default()
-            .fg(INPUT_SELECTED_FG)
-            .bg(INPUT_SELECTED_BG)
+            .fg(SELECTED_FG)
+            .bg(SELECTED_BG)
             .add_modifier(Modifier::BOLD)
     } else {
         input
@@ -1302,7 +1306,6 @@ mod tests {
             (PANEL_FG, PANEL_BG),
             (PANEL_ACCENT, PANEL_BG),
             (INPUT_FG, INPUT_BG),
-            (INPUT_SELECTED_FG, INPUT_SELECTED_BG),
         ] {
             assert!(contrast(foreground, background) >= 7.0);
         }
