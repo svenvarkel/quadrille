@@ -1,7 +1,8 @@
 # Quadrille
 
-A CSV cell editor for agents and humans, with a JSON CLI and a terminal UI. The first working version is deliberately
-small: browse, sort, edit, undo, and save a copy without loading the entire file into RAM.
+A CSV, XLSX and ODS cell editor for agents and humans, with a JSON CLI and a terminal UI.
+Browse, sort, edit, undo, and save a copy. Large CSVs use sparse indexing; workbooks
+have a separate, bounded import step.
 
 ## Run
 
@@ -73,6 +74,7 @@ version is intended for targeted corrections, not millions of per-cell patches.
 | Home / End | First / last column in the current record |
 | Ctrl+Home / Ctrl+End | First / last indexed record |
 | Ctrl+G | Go to a record number; wait for indexing if necessary |
+| w | Choose workbook sheet with arrows, name or number; save edits first |
 | Enter / F2 | Edit the selected cell |
 | Ctrl+Z | Undo the last cell edit |
 | Ctrl+S / F4 | Save to a **new** filename |
@@ -146,7 +148,62 @@ removes skipped blank lines, and retains an initial UTF-8 BOM. Unedited field by
 are copied; edited records may be requoted. Clear the sort before saving if you
 want the original order and original record-ending preservation.
 
-## What this version supports
+## XLSX and ODS workbooks
+
+```sh
+./target/release/qd workbook.xlsx --sheets
+./target/release/qd workbook.xlsx --sheet 'Loans'
+./target/release/qd workbook.ods --sheet 'Loans' --read A1:D20
+./target/release/qd workbook.xlsx --sheet 'Loans' --set B7 '00123' --output corrected.xlsx
+./target/release/qd workbook.ods --sheet 'Loans' --sort 'B:n' --output sorted.csv
+```
+
+The first sheet opens by default. `--sheets` lists names as JSON; `--sheet NAME`
+selects one sheet for all CLI operations or the TUI. Press **w** in the TUI to
+choose another sheet. Save pending edits to a native workbook first; switching
+then opens the chosen sheet from that saved copy, retaining previous sheet edits.
+CSV export leaves pending workbook edits unsaved.
+
+Cell addresses match the workbook, including leading empty rows and columns.
+Blank cells inside the imported rectangle are editable. Expanding beyond its last
+used row/column, adding sheets, and inserting/deleting rows are not supported.
+
+Values are displayed and returned as strings. Numbers use the reader's numeric
+representation; Excel date cells currently show serial values, not formatted dates.
+**Every edit writes literal text**, including numeric-looking strings and `=...`.
+Existing unedited cell types and number formats remain intact. This version does
+not offer typed numeric/date edits or create formulas.
+
+Formula cells show their cached results; the TUI preview also shows the formula,
+and CLI `--read` includes a `formulas` map. **qd does not recalculate formulas**;
+cached results may be missing or stale, including after edits to their inputs.
+Formula, merged and array-result cells are read-only. Use Excel/LibreOffice for
+recalculation. Values exported to CSV include those cached results.
+
+Native Save As (`.xlsx` to `.xlsx`, `.ods` to `.ods`) patches edited cells in the
+original ZIP/XML package. Other sheets, styles, formulas and unrelated package
+members are preserved; XML outside edited cells/rows is retained. ODS repeated
+rows/cells are split around edits. An unchanged save, including after undoing all
+edits, is a byte-identical copy. Digitally signed workbooks refuse edited saves.
+Encrypted workbooks are unsupported.
+
+Sorting works in the view and in CSV exports. **Native saves require source row
+order**: clear the sort before saving, or use `.csv` to export the sorted sheet.
+Reordering workbook rows would also require updating formula references and other
+workbook structures. Format conversion between XLSX and ODS, and CSV-to-workbook
+creation, are not implemented.
+
+Import uses [calamine](https://github.com/tafia/calamine) and a temporary CSV so the
+existing navigation, edits, undo and sorting engine is shared. The import happens
+before the TUI opens and temporarily holds workbook data in memory; XLSX reads the
+selected sheet, while ODS loads all sheets. Current limits: **256 MiB uncompressed
+package size**, **128 MiB per XML member**, **2 million XML nodes per parsed part**,
+and **5 million cells per sheet rectangle**, including leading empty cells. These
+are admission limits, not a total process memory cap. CSV retains its large-file
+path and has none of these workbook limits. `--check` reports indexed cache bytes
+as `bytes` and original workbook size separately as `source_bytes`.
+
+## CSV support
 
 - UTF-8 CSV, with or without a BOM, including quoted delimiters, escaped quotes,
   multiline fields, LF / CRLF record endings, and uneven record lengths.
@@ -161,13 +218,13 @@ want the original order and original record-ending preservation.
 
 ## Save behavior and limits
 
-Saves always create a new file. The default is `original.edited.csv` beside the
+Saves always create a new file. The default is `original.edited.<extension>` beside the
 source. Existing destinations, including the source itself, are refused. Output is
 written to a temporary file in the destination directory, flushed and synced, then
 published without overwriting an existing path. Detected source changes or write
 errors prevent publication.
 
-When no sort is active, unedited records are copied as raw bytes. **Edited records are reserialized**:
+For CSV, when no sort is active, unedited records are copied as raw bytes. **Edited records are reserialized**:
 field values and record endings are preserved, but optional quoting within those
 records may change. This is not yet byte-exact preservation of unedited fields
 inside an edited record. With no sort active, an unchanged save or a save after undoing all edits
@@ -184,8 +241,8 @@ The underlying `csv` parser is permissive about malformed quoting: `--check` che
 readability and UTF-8, **not** strict RFC 4180 conformance. Use well-formed CSV files
 for this proof of concept.
 
-This version has no formulas, filtering, row insertion/deletion, workbook
-formats, or MCP server. The CLI and TUI use the same editing engine, but separate
+This version has no formula calculation/editing, filtering, row insertion/deletion,
+or MCP server. The CLI and TUI use the same editing engine, but separate
 processes do not share a live editing session. Very large individual
 records still require proportional memory, and large pasted edits/undo history
 are held in memory.
@@ -198,12 +255,16 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 # After cargo build --release, on macOS/Linux:
 python3 tests/tui_smoke.py
+python3 tests/workbook_smoke.py target/release/qd
+python3 tests/workbook_tui_smoke.py target/release/qd
 ```
 
 Tests cover multiline and quoted fields, UTF-8, BOM and line endings, sparse seeks,
 copy/edit/undo round trips, source-change detection, refusal to overwrite existing
 files, CLI patches and dry runs, sorting with stable edit identity, mouse navigation,
-and terminal input/rendering. The original exploration is in
+and terminal input/rendering. Workbook tests cover sheet selection, source coordinates,
+formula/merge protection, styles, repeated ODS rows/cells, untouched ZIP members,
+native saves, undo, CSV exports and switching sheets after saving. The original exploration is in
 [the technical and business analysis](docs/quadrille-analysis.md); its broader
 roadmap and preliminary performance estimates are not shipped capabilities.
 

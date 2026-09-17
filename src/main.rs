@@ -63,6 +63,7 @@ enum Action {
     Save,
     Goto,
     Sort,
+    Sheet,
     Quit,
 }
 
@@ -72,6 +73,7 @@ struct Prompt {
     cursor: usize,
     select_all: bool,
     header: bool,
+    choices: Vec<String>,
 }
 
 impl Prompt {
@@ -81,8 +83,9 @@ impl Prompt {
             action,
             text,
             cursor,
-            select_all: matches!(action, Action::Edit | Action::Sort),
+            select_all: matches!(action, Action::Edit | Action::Sort | Action::Sheet),
             header: true,
+            choices: Vec::new(),
         }
     }
 
@@ -97,6 +100,24 @@ impl Prompt {
     }
 
     fn key(&mut self, key: KeyEvent) {
+        if self.action == Action::Sheet && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            let i = self
+                .choices
+                .iter()
+                .position(|s| s == &self.text)
+                .unwrap_or(0);
+            let i = if key.code == KeyCode::Up {
+                i.saturating_sub(1)
+            } else {
+                (i + 1).min(self.choices.len().saturating_sub(1))
+            };
+            if let Some(name) = self.choices.get(i) {
+                self.text = name.clone();
+                self.cursor = self.text.len();
+                self.select_all = true;
+            }
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('a') if ctrl => self.select_all = true,
@@ -168,6 +189,7 @@ struct App {
     unsaved: bool,
     message: String,
     pending_row: Option<u64>,
+    saved_workbook: Option<PathBuf>,
 }
 
 impl App {
@@ -190,6 +212,7 @@ impl App {
             unsaved: false,
             message: "? / h Help · click a cell · double-click to edit · F6 Sort".into(),
             pending_row: None,
+            saved_workbook: None,
         }
     }
 
@@ -199,8 +222,20 @@ impl App {
             if let Some(job) = &self.save {
                 match job.result.try_recv() {
                     Ok(Ok(path)) => {
+                        if self.sheet.sheet_name().is_some()
+                            && path.extension().is_some_and(|e| {
+                                e.to_string_lossy()
+                                    .eq_ignore_ascii_case(self.sheet.format())
+                            })
+                        {
+                            self.saved_workbook = Some(path.clone());
+                        }
                         self.message = format!("Saved {} — source unchanged", path.display());
-                        self.unsaved = false;
+                        self.unsaved = self.sheet.sheet_name().is_some()
+                            && path
+                                .extension()
+                                .is_some_and(|e| e.eq_ignore_ascii_case("csv"))
+                            && (self.sheet.edit_count() > 0 || self.sheet.sort_order().is_some());
                         self.save = None;
                     }
                     Ok(Err(error)) => {
@@ -224,7 +259,11 @@ impl App {
                                 self.loaded = None;
                                 self.pending_row = None;
                                 self.unsaved = true;
-                                self.message = "Sorted · Save As writes this order · F6, clear restores source order".into();
+                                self.message = if self.sheet.sheet_name().is_some() {
+                                    "Sorted view · Save As .csv to export · clear sort for native workbook save".into()
+                                } else {
+                                    "Sorted · Save As writes this order · F6, clear restores source order".into()
+                                };
                             }
                             Err(error) => self.message = error.to_string(),
                         }
@@ -376,6 +415,7 @@ impl App {
                         match self.sheet.set(self.row, self.col, prompt.text) {
                             Ok(()) if changed => {
                                 self.unsaved = true;
+                                self.saved_workbook = None;
                                 self.message = "Cell updated · Ctrl+Z undo".into();
                             }
                             Ok(()) => {}
@@ -417,6 +457,32 @@ impl App {
                             }
                         }
                     }
+                    Action::Sheet => {
+                        let text = prompt.text.as_str();
+                        let name = prompt
+                            .choices
+                            .iter()
+                            .find(|name| name.as_str() == text)
+                            .or_else(|| {
+                                text.trim()
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|n| n.checked_sub(1))
+                                    .and_then(|n| prompt.choices.get(n))
+                            });
+                        if let Some(name) = name {
+                            let source = self.saved_workbook.as_ref().unwrap_or(&self.sheet.path);
+                            match Sheet::open_sheet(source, b',', Some(name)) {
+                                Ok(sheet) => {
+                                    *self = Self::new(sheet);
+                                    self.message = "Sheet opened · w selects another sheet".into();
+                                }
+                                Err(error) => self.message = error.to_string(),
+                            }
+                        } else {
+                            self.message = "Choose a sheet name or its number".into();
+                        }
+                    }
                     Action::Quit => unreachable!(),
                 }
             } else {
@@ -429,6 +495,7 @@ impl App {
             KeyCode::Char('?' | 'h') | KeyCode::F(1) => self.help = Some(0),
             KeyCode::Char('s') if !ctrl => self.begin_sort(),
             KeyCode::F(6) => self.begin_sort(),
+            KeyCode::Char('w') if !ctrl => self.begin_sheet(),
             KeyCode::Esc if self.sorting.is_some() => {
                 self.sorting
                     .as_ref()
@@ -461,6 +528,7 @@ impl App {
             KeyCode::Char('z') if ctrl && self.save.is_none() && self.sorting.is_none() => {
                 if self.sheet.undo() {
                     self.unsaved = true;
+                    self.saved_workbook = None;
                     self.message = "Undone".into();
                 } else {
                     self.message = "Nothing to undo".into();
@@ -524,6 +592,23 @@ impl App {
         if let Some(order) = self.sheet.sort_order() {
             prompt.header = order.header;
         }
+        self.prompt = Some(prompt);
+    }
+
+    fn begin_sheet(&mut self) {
+        if self.sheet.sheet_name().is_none() {
+            self.message = "CSV files have one sheet".into();
+            return;
+        }
+        if self.save.is_some() || self.sorting.is_some() {
+            return;
+        }
+        if self.sheet.edit_count() > 0 && (self.unsaved || self.saved_workbook.is_none()) {
+            self.message = "Save edits to a native workbook before switching sheets (CSV export saves only values)".into();
+            return;
+        }
+        let mut prompt = Prompt::new(Action::Sheet, self.sheet.sheet_name().unwrap().to_owned());
+        prompt.choices = self.sheet.workbook_sheet_names().to_vec();
         self.prompt = Some(prompt);
     }
 
@@ -731,10 +816,20 @@ impl App {
         let table = Table::new(rows, widths)
             .flex(Flex::Start)
             .header(Row::new(header).style(blue))
-            .block(Block::bordered().title(" CSV · all cells are text "));
+            .block(Block::bordered().title(match self.sheet.sheet_name() {
+                Some(name) => format!(
+                    " {} · {} · w Sheets · edits are text · formulas read-only ",
+                    self.sheet.format(),
+                    safe(name)
+                ),
+                None => " CSV · all cells are text ".into(),
+            }));
         frame.render_widget(table, areas[1]);
         let cell = format!("{}{}", column_name(self.col), self.row + 1);
-        let value = self.current().map(safe).unwrap_or_default();
+        let mut value = self.current().map(safe).unwrap_or_default();
+        if let Some(formula) = self.sheet.formula(self.row, self.col) {
+            value = format!("={} · cached: {value}", safe(formula));
+        }
         frame.render_widget(
             Paragraph::new(format!("{cell}: {value}")).wrap(Wrap { trim: false }),
             areas[2],
@@ -747,10 +842,14 @@ impl App {
         let status = if let Some(error) = &p.error {
             format!("INDEX ERROR: {error}")
         } else if let Some(job) = &self.save {
-            format!(
-                "Saving {:.1}% · navigation available",
-                job.bytes.load(Ordering::Relaxed) as f64 / p.total_bytes.max(1) as f64 * 100.0
-            )
+            if self.sheet.sheet_name().is_some() {
+                "Saving workbook/export · navigation available".into()
+            } else {
+                format!(
+                    "Saving {:.1}% · navigation available",
+                    job.bytes.load(Ordering::Relaxed) as f64 / p.total_bytes.max(1) as f64 * 100.0
+                )
+            }
         } else if let Some(job) = &self.sorting {
             let done = job.rows.load(Ordering::Relaxed);
             if done == p.rows {
@@ -824,6 +923,7 @@ const HELP_LINES: &[&str] = &[
     "Ctrl+Home / Ctrl+End     First / last indexed record",
     "Ctrl+G                   Go to a record number",
     "+ / -                    Widen / narrow columns",
+    "w                        Choose workbook sheet (save edits first)",
     "MOUSE",
     "Click / drag             Select a cell",
     "Double-click             Edit a cell",
@@ -848,7 +948,9 @@ const HELP_LINES: &[&str] = &[
     "QUIT",
     "q / Ctrl+Q / Ctrl+C / F10  Quit (confirm unsaved changes)",
     "? / h / F1               Help; Esc closes help",
-    "Rows include the header. All stored values remain text.",
+    "Rows include the header. CSV values and new workbook edits are text.",
+    "Workbooks: formulas are read-only cached results; qd does not recalculate.",
+    "Native saves preserve the workbook; clear sorting first. Export views as .csv.",
 ];
 
 fn screen_layout(area: Rect) -> [Rect; 6] {
@@ -919,7 +1021,7 @@ fn draw_help(frame: &mut Frame, scroll: u16) {
 fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(100);
-    let height = area.height.min(6);
+    let height = area.height.min(6 + prompt.choices.len().min(20) as u16);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -929,9 +1031,10 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     let title = match prompt.action {
         Action::Edit => " Edit cell · Enter apply · Esc cancel · Ctrl+J newline ",
         Action::Save => " Save as NEW file · Enter save · Esc cancel ",
-        Action::Goto => " Go to CSV record (1-based, including header) ",
+        Action::Goto => " Go to row (1-based, including header) ",
         Action::Quit => " Discard unsaved changes? y / n ",
         Action::Sort => " Sort columns · Enter apply · Esc cancel ",
+        Action::Sheet => " Sheet · ↑/↓ or name/number · Enter open · Esc cancel ",
     };
     frame.render_widget(Clear, popup);
     let block = Block::bordered().title(title);
@@ -957,6 +1060,29 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     );
     if prompt.action != Action::Quit {
         frame.set_cursor_position((inner.x + (cursor_width - scroll) as u16, inner.y));
+    }
+    if inner.height > 2 && prompt.action == Action::Sheet {
+        let selected = prompt
+            .choices
+            .iter()
+            .position(|s| s == &prompt.text)
+            .unwrap_or(0);
+        let names = prompt
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{}  {}", i + 1, safe(name)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        frame.render_widget(
+            Paragraph::new(names).scroll((
+                selected
+                    .saturating_sub(inner.height.saturating_sub(3) as usize)
+                    .min(u16::MAX as usize) as u16,
+                0,
+            )),
+            Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2),
+        );
     }
     if inner.height > 2 && prompt.action == Action::Sort {
         frame.render_widget(

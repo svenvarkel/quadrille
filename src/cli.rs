@@ -11,13 +11,15 @@ use std::{
 use quadrille::{Result, Sheet, parse_sort};
 use serde_json::{Value, json};
 
-const HELP: &str = r#"Quadrille — large CSV cell editor for humans and agents
+const HELP: &str = r#"Quadrille — CSV, XLSX and ODS cell editor for humans and agents
 
 Usage: qd [OPTIONS] FILE
 
 Without headless options, opens the terminal UI.
 
   -d, --delimiter CHAR  Separator (default: comma; 'tab' for TSV)
+      --sheets          List workbook sheet names as JSON
+      --sheet NAME      Open a workbook sheet (default: first sheet)
       --check           Scan the file; emit JSON counts, timing and index size
       --read A1:C10     Read a rectangle as JSON (at most 100,000 cells / 10,000 rows)
       --set CELL VALUE  Change one cell; repeat for multiple edits
@@ -45,7 +47,12 @@ Ctrl+Home / Ctrl+End first / last indexed row, Ctrl+G go to row,
 Enter / F2 edit, Ctrl+Z undo, Ctrl+S / F4 save as, +/- column width,
 q / Ctrl+Q quit. In an editor: Ctrl+A select all, Ctrl+J insert newline.
 
-UTF-8 CSV only. Without sorting, unedited records retain their bytes. Edited
+Workbooks: --sheet selects one sheet; --sheets lists them. Values are read as
+text; edits are literal text. Formulas are read-only, with cached results only.
+Native saves preserve other sheets/styles and require source row order.
+Use a .csv destination to export the selected sheet, including a sorted view.
+
+UTF-8 CSV: without sorting, unedited records retain their bytes. Edited
 records may be requoted. Sorted exports use LF endings and skip blank lines.
 --check checks readability and UTF-8, not strict CSV syntax.
 "#;
@@ -117,6 +124,8 @@ pub fn open() -> Result<Option<Sheet>> {
     }
     let mut path = None;
     let mut delimiter = b',';
+    let mut selected_sheet = None;
+    let mut list_sheets = false;
     let mut check = false;
     let mut read = None;
     let mut edits = Vec::new();
@@ -134,6 +143,10 @@ pub fn open() -> Result<Option<Sheet>> {
                 return Ok(None);
             }
             Some("--check") if !positional => check = true,
+            Some("--sheets") if !positional => list_sheets = true,
+            Some("--sheet") if !positional => {
+                selected_sheet = Some(next_text(&mut args, "--sheet")?)
+            }
             Some("--sort") if !positional => sort = Some(next_text(&mut args, "--sort")?),
             Some("--no-header") if !positional => header = false,
             Some("--dry-run") if !positional => dry_run = true,
@@ -191,6 +204,23 @@ pub fn open() -> Result<Option<Sheet>> {
             }
         }
     }
+    if list_sheets {
+        if check
+            || read.is_some()
+            || edits_requested
+            || dry_run
+            || output.is_some()
+            || sort.is_some()
+            || selected_sheet.is_some()
+            || !header
+            || delimiter != b','
+        {
+            return Err("Use --sheets by itself with a workbook filename".into());
+        }
+        let path = path.ok_or("Missing workbook filename")?;
+        emit(&json!({"source": path, "sheets": Sheet::sheet_names(&path)?}))?;
+        return Ok(None);
+    }
     if edits_requested && !dry_run && output.is_none() {
         return Err("Edits require --dry-run or --output NEW_FILE".into());
     }
@@ -213,7 +243,11 @@ pub fn open() -> Result<Option<Sheet>> {
         return Err("--check cannot be combined with read/edit/save options".into());
     }
     let started = Instant::now();
-    let mut sheet = Sheet::open(&path.ok_or("Missing CSV filename")?, delimiter)?;
+    let mut sheet = Sheet::open_sheet(
+        &path.ok_or("Missing filename")?,
+        delimiter,
+        selected_sheet.as_deref(),
+    )?;
     let headless = check || read.is_some() || !edits.is_empty() || dry_run || output.is_some();
     if !headless {
         return Ok(Some(sheet));
@@ -239,13 +273,17 @@ pub fn open() -> Result<Option<Sheet>> {
     }
     let p = sheet.progress();
     if check {
-        emit(
-            &json!({"records": p.rows, "bytes": p.total_bytes, "index_bytes": p.index_bytes, "elapsed_seconds": started.elapsed().as_secs_f64()}),
-        )?;
+        let mut result = json!({"records": p.rows, "bytes": p.total_bytes, "index_bytes": p.index_bytes, "elapsed_seconds": started.elapsed().as_secs_f64()});
+        if let Some(name) = sheet.sheet_name() {
+            result["sheet"] = json!(name);
+            result["format"] = json!(sheet.format());
+            result["source_bytes"] = json!(std::fs::metadata(&sheet.path)?.len());
+        }
+        emit(&result)?;
         return Ok(None);
     }
     if read.is_some_and(|r| r.last.0 >= p.rows) {
-        return Err("Requested range extends beyond the last CSV record".into());
+        return Err("Requested range extends beyond the last row".into());
     }
     let mut changes = BTreeMap::new();
     for ((row, col), value) in edits {
@@ -264,6 +302,12 @@ pub fn open() -> Result<Option<Sheet>> {
         .map(|((row, col), (before, after))| json!({"cell": format!("{}{}", super::column_name(col), row + 1), "before": before, "after": after})).collect();
     let mut result =
         json!({"source": sheet.path.to_string_lossy(), "changes": changes, "dry_run": dry_run});
+    if let Some(name) = sheet.sheet_name() {
+        result["sheet"] = json!(name);
+        result["format"] = json!(sheet.format());
+        result["formula_results"] = json!("cached; not recalculated by qd");
+        result["edit_type"] = json!("text");
+    }
     if let Some(spec) = &sort {
         let job = sheet.start_sort(parse_sort(spec)?, header)?;
         let order = job.result.recv()??;
@@ -286,6 +330,20 @@ pub fn open() -> Result<Option<Sheet>> {
             })
             .collect();
         result["rows"] = json!(rows);
+        if sheet.sheet_name().is_some() {
+            let mut formulas = serde_json::Map::new();
+            for row in range.first.0..=range.last.0 {
+                for col in range.first.1..=range.last.1 {
+                    if let Some(formula) = sheet.formula(row, col) {
+                        formulas.insert(
+                            format!("{}{}", super::column_name(col), row + 1),
+                            json!(formula),
+                        );
+                    }
+                }
+            }
+            result["formulas"] = Value::Object(formulas);
+        }
         result["range"] = json!(format!(
             "{}{}:{}{}",
             super::column_name(range.first.1),

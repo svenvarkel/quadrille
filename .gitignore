@@ -13,3 +13,4 @@
 .vscode/
 *.swp
 test-data/*.*
+__pycache__

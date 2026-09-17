@@ -3,7 +3,7 @@ name          = "quadrille"
 version       = "0.0.0"
 edition        = "2024"
 rust-version   = "1.85"
-description    = "Large CSV cell editor with a terminal UI and a JSON command-line interface."
+description    = "CSV, XLSX and ODS cell editor with a terminal UI and a JSON command-line interface."
 license        = "MIT OR Apache-2.0"
 repository     = "https://github.com/svenvarkel/quadrille"
 homepage       = "https://quadrille.dev"
@@ -26,6 +26,9 @@ name = "qd"
 path = "src/main.rs"
 
 [dependencies]
+calamine = "0.31"
+roxmltree = "0.21"
+zip = { version = "4.2", default-features = false, features = ["deflate"] }
 csv = "1.3"
 crossterm = "0.28"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }

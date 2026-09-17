@@ -105,7 +105,7 @@ impl Sheet {
         if keys.is_empty() {
             return Err("Choose at least one sort column".into());
         }
-        self.stamp.check(&self.path)?;
+        self.check_source()?;
         let minimum = size_of::<Entry>()
             .checked_add(
                 keys.len()
@@ -118,7 +118,7 @@ impl Sheet {
             return Err("Sort keys exceed the 512 MiB budget; try fewer columns. Disk-backed sorting is not implemented yet".into());
         }
         let (path, stamp, delimiter, edits, revision) = (
-            self.path.clone(),
+            self.data_path().to_path_buf(),
             self.stamp.clone(),
             self.delimiter,
             self.edits.clone(),
@@ -128,8 +128,10 @@ impl Sheet {
         let cancel = Arc::new(AtomicBool::new(false));
         let (progress, stop) = (rows.clone(), cancel.clone());
         let (sender, result) = mpsc::channel();
+        let workbook = self.workbook.clone();
         thread::spawn(move || {
             let result = (|| -> Result<SortOrder> {
+                if let Some(w) = &workbook { w.check_source()?; }
                 stamp.check(&path)?;
                 let mut parser = reader(File::open(&path)?, delimiter);
                 let mut record = csv::StringRecord::new();
@@ -185,7 +187,10 @@ impl Sheet {
                 let rows = entries.into_iter().map(|e| e.record).collect();
                 stamp.check(&path)?;
                 Ok(SortOrder { rows, keys, header, revision })
-            })().map_err(|e| e.to_string());
+            })().and_then(|order| {
+                if let Some(w) = &workbook { w.check_source()?; }
+                Ok(order)
+            }).map_err(|e| e.to_string());
             let _ = sender.send(result);
         });
         Ok(SortJob {
@@ -196,7 +201,7 @@ impl Sheet {
     }
 
     pub fn apply_sort(&mut self, order: SortOrder) -> Result<()> {
-        self.stamp.check(&self.path)?;
+        self.check_source()?;
         if order.revision != self.revision {
             return Err("Edits changed while sorting; run the sort again".into());
         }

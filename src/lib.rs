@@ -15,6 +15,7 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 mod sort;
+mod workbook;
 pub use sort::{SortJob, SortKey, SortOrder, parse_sort};
 
 const STRIDE: u64 = 64;
@@ -81,6 +82,7 @@ pub struct Sheet {
     undo: Vec<((u64, usize), Option<String>)>,
     order: Option<Arc<SortOrder>>,
     revision: u64,
+    workbook: Option<Arc<workbook::Workbook>>,
 }
 
 pub struct SaveJob {
@@ -99,6 +101,23 @@ fn reader(file: File, delimiter: u8) -> csv::Reader<File> {
 
 impl Sheet {
     pub fn open(path: &Path, delimiter: u8) -> Result<Self> {
+        Self::open_sheet(path, delimiter, None)
+    }
+
+    pub fn open_sheet(path: &Path, delimiter: u8, name: Option<&str>) -> Result<Self> {
+        if workbook::is_workbook(path) {
+            if delimiter != b',' {
+                return Err("--delimiter applies to CSV files only".into());
+            }
+            return workbook::open(path, name);
+        }
+        if name.is_some() {
+            return Err("--sheet applies to XLSX and ODS workbooks only".into());
+        }
+        Self::open_csv(path, delimiter)
+    }
+
+    fn open_csv(path: &Path, delimiter: u8) -> Result<Self> {
         if !delimiter.is_ascii() || matches!(delimiter, b'\r' | b'\n' | b'"' | 0) {
             return Err(
                 "Delimiter must be a single ASCII byte other than a quote, CR, LF or NUL".into(),
@@ -136,7 +155,45 @@ impl Sheet {
             undo: Vec::new(),
             order: None,
             revision: 0,
+            workbook: None,
         })
+    }
+
+    pub fn sheet_names(path: &Path) -> Result<Vec<String>> {
+        workbook::sheet_names(path)
+    }
+
+    pub fn sheet_name(&self) -> Option<&str> {
+        self.workbook.as_ref().map(|w| w.name.as_str())
+    }
+
+    pub fn workbook_sheet_names(&self) -> &[String] {
+        self.workbook.as_ref().map_or(&[], |w| &w.names)
+    }
+
+    pub fn format(&self) -> &str {
+        self.workbook.as_ref().map_or("CSV", |w| w.format.as_str())
+    }
+
+    pub fn formula(&self, row: u64, col: usize) -> Option<&str> {
+        self.workbook
+            .as_ref()?
+            .formulas
+            .get(&(self.source_row(row), col))
+            .map(String::as_str)
+    }
+
+    fn data_path(&self) -> &Path {
+        self.workbook
+            .as_ref()
+            .map_or(&self.path, |w| w.cache.path())
+    }
+
+    fn check_source(&self) -> Result<()> {
+        if let Some(w) = &self.workbook {
+            w.check_source()?;
+        }
+        self.stamp.check(self.data_path())
     }
 
     pub fn progress(&self) -> Progress {
@@ -153,7 +210,7 @@ impl Sheet {
 
     /// Zero-based CSV records, including any header. Quoted newlines are not rows.
     pub fn window(&mut self, start: u64, count: usize) -> Result<Vec<csv::StringRecord>> {
-        self.stamp.check(&self.path)?;
+        self.check_source()?;
         if let Some(order) = &self.order {
             let mut rows = Vec::new();
             for reference in order.rows.iter().skip(start as usize).take(count) {
@@ -213,6 +270,9 @@ impl Sheet {
         if self.value(row, col, original) == value {
             return Ok(());
         }
+        if let Some(w) = &self.workbook {
+            w.validate_edit(self.source_row(row), col, &value)?;
+        }
         let key = (self.source_row(row), col);
         self.revision += 1;
         self.undo.push((key, self.edits.get(&key).cloned()));
@@ -246,7 +306,14 @@ impl Sheet {
         if !index.done {
             return Err("Wait for indexing to finish before saving".into());
         }
-        self.stamp.check(&self.path)?;
+        self.check_source()?;
+        if let Some(w) = &self.workbook {
+            w.validate_destination(destination, self.order.is_some())?;
+        } else if workbook::is_workbook(destination) {
+            return Err(
+                "CSV to workbook conversion is not supported; use a CSV destination".into(),
+            );
+        }
         if destination.try_exists()? {
             return Err("Destination already exists; choose a new filename".into());
         }
@@ -256,7 +323,7 @@ impl Sheet {
             .unwrap_or(Path::new("."));
         let temp = tempfile::NamedTempFile::new_in(parent)?;
         let (path, stamp, delimiter, offsets, edits, destination) = (
-            self.path.clone(),
+            self.data_path().to_path_buf(),
             self.stamp.clone(),
             self.delimiter,
             index.offsets.clone(),
@@ -266,6 +333,7 @@ impl Sheet {
         let bytes = Arc::new(AtomicU64::new(0));
         let progress = bytes.clone();
         let order = self.order.clone();
+        let workbook = self.workbook.clone();
         let (sender, result) = mpsc::channel();
         thread::spawn(move || {
             let result = save(
@@ -278,6 +346,7 @@ impl Sheet {
                 temp,
                 &progress,
                 order.as_deref(),
+                workbook.as_deref(),
             )
             .map(|()| destination)
             .map_err(|e| e.to_string());
@@ -344,7 +413,14 @@ fn save(
     mut temp: tempfile::NamedTempFile,
     progress: &AtomicU64,
     order: Option<&SortOrder>,
+    workbook: Option<&workbook::Workbook>,
 ) -> Result<()> {
+    if let Some(w) = workbook {
+        w.check_source()?;
+        if workbook::is_workbook(destination) {
+            return w.save(edits, destination, temp, progress);
+        }
+    }
     stamp.check(path)?;
     let mut input = File::open(path)?;
     let mut parser = reader(File::open(path)?, delimiter);
@@ -415,6 +491,9 @@ fn save(
         return Err("Source changed during save; output was not published".into());
     }
     temp.as_file().sync_all()?;
+    if let Some(w) = workbook {
+        w.check_source()?;
+    }
     temp.persist_noclobber(destination)?;
     Ok(())
 }
