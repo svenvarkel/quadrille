@@ -44,7 +44,16 @@ try:
     while (b'Quadrille' not in output or b'00123' not in output) and time.monotonic() < deadline and process.poll() is None:
         collect(0.1)
     assert b'Quadrille' in output and b'00123' in output, ('Initial grid missing', process.poll(), bytes(output[-2000:]))
+    mark = len(output)
     send(b'?')
+    assert b'NAVIGATION' in output[mark:]
+    mark = len(output)
+    send(b'\x1b[C')
+    assert b'EDIT AND SAVE' in output[mark:]
+    mark = len(output)
+    send(b'\x1b[C')
+    assert b'Sorting' in output[mark:], output[mark:]
+    send(b'\x1b[Z')  # Shift+Tab returns to Editing.
     send(b'\x1b')
     send(b'h')
     send(b'\x1b')
@@ -80,7 +89,7 @@ try:
     assert process.wait(timeout=3) == 0
     assert b'\x1b[?1006l' in output, 'Mouse capture was not disabled'
     assert b'\x1b[?1049l' in output, 'Terminal alternate screen was not restored'
-    print('PTY smoke PASS: help, mouse double-click, edit, undo, paste, footer sort, Save As, no-clobber, clean exit')
+    print('PTY smoke PASS: tabbed help, mouse double-click, edit, undo, paste, footer sort, Save As, no-clobber, clean exit')
 finally:
     if process.poll() is None:
         process.kill(); process.wait()

@@ -67,7 +67,7 @@ version is intended for targeted corrections, not millions of per-cell patches.
 
 | Key | Action |
 | --- | --- |
-| ? / h / F1 | Open command help; Esc closes it |
+| ? / h / F1 | Open command help; Left/Right or Tab changes tabs; Esc closes it |
 | s / F6 | Sort dialog; click a column heading to preselect it |
 | Arrow keys, Tab / Shift+Tab | Move between cells |
 | PageUp / PageDown | Move one screen |
@@ -92,6 +92,16 @@ Mouse capture is enabled while the editor is open: click or drag to select a cel
 double-click to edit, wheel to scroll vertically, and Shift+wheel or a horizontal
 wheel to move across columns. The bottom function-key bar is clickable. Mouse
 reporting must be supported by your terminal; capture is disabled on exit.
+
+The built-in palette uses explicit RGB pairs with at least 7:1 calculated text
+contrast, exceeding the WCAG 2.2 enhanced target. Selection uses an amber background
+plus bold text; edited cells use color plus underlining, so state is not conveyed by
+color alone. Dialog inputs use dark text on a light field because controlled studies
+generally find positive polarity easier to read. These are accessibility design
+criteria rather than a legal conformance claim; terminal color approximation and font
+choice remain outside `qd`'s control. References: [WCAG 2.2 contrast](https://www.w3.org/TR/WCAG22/#contrast-enhanced),
+[EU Directive 2019/882 Annex I](https://eur-lex.europa.eu/eli/dir/2019/882/oj), and
+[Dobres, Chahine & Reimer (2017)](https://pubmed.ncbi.nlm.nih.gov/28166901/).
 
 In the editor, typing replaces the initially selected value. Use Left / Right to
 move the cursor and keep the existing text, Ctrl+A to select all, Ctrl+J to insert

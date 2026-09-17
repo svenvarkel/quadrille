@@ -18,12 +18,29 @@ use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
 mod cli;
+
+const GRID_BG: Color = Color::Rgb(18, 18, 18);
+const GRID_FG: Color = Color::Rgb(238, 238, 238);
+const ROW_FG: Color = Color::Rgb(178, 184, 196);
+const EDITED_FG: Color = Color::Rgb(255, 221, 87);
+const SELECTED_BG: Color = Color::Rgb(255, 215, 64);
+const SELECTED_FG: Color = Color::Rgb(17, 24, 39);
+const BAR_BG: Color = Color::Rgb(0, 69, 138);
+const BAR_FG: Color = Color::Rgb(255, 255, 255);
+const PANEL_BG: Color = Color::Rgb(24, 48, 96);
+const PANEL_FG: Color = Color::Rgb(255, 255, 255);
+const PANEL_ACCENT: Color = Color::Rgb(134, 226, 255);
+const PANEL_BORDER: Color = Color::Rgb(118, 196, 255);
+const INPUT_BG: Color = Color::Rgb(248, 250, 252);
+const INPUT_FG: Color = Color::Rgb(17, 24, 39);
+const INPUT_SELECTED_BG: Color = Color::Rgb(0, 75, 135);
+const INPUT_SELECTED_FG: Color = Color::Rgb(255, 255, 255);
 
 fn main() {
     if let Err(error) = run() {
@@ -183,7 +200,7 @@ struct App {
     prompt: Option<Prompt>,
     save: Option<SaveJob>,
     sorting: Option<SortJob>,
-    help: Option<u16>,
+    help: Option<Help>,
     help_limit: u16,
     last_click: Option<(u64, usize, Instant)>,
     unsaved: bool,
@@ -293,13 +310,17 @@ impl App {
             }
             let size = terminal.size()?;
             let screen = Rect::new(0, 0, size.width, size.height);
-            if let Some(scroll) = &mut self.help {
-                let inner = help_area(screen).inner(Margin::new(1, 1));
-                self.help_limit = Paragraph::new(help_lines().collect::<Vec<_>>().join("\n"))
-                    .wrap(Wrap { trim: false })
-                    .line_count(inner.width)
-                    .saturating_sub(inner.height as usize) as u16;
-                *scroll = (*scroll).min(self.help_limit);
+            if let Some(help) = &mut self.help {
+                let body = help_layout(screen)[2];
+                self.help_limit = if body.width == 0 || body.height == 0 {
+                    0
+                } else {
+                    Paragraph::new(help_lines(help.tab).join("\n"))
+                        .wrap(Wrap { trim: false })
+                        .line_count(body.width)
+                        .saturating_sub(body.height as usize) as u16
+                };
+                help.scroll = help.scroll.min(self.help_limit);
             }
             let grid = screen_layout(screen)[1].inner(Margin::new(1, 1));
             let height = grid.height.saturating_sub(1).max(1) as usize;
@@ -379,13 +400,29 @@ impl App {
 
     fn key(&mut self, key: KeyEvent, height: usize, p: &Progress) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if let Some(scroll) = &mut self.help {
+        if let Some(help) = &mut self.help {
             match key.code {
                 KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?' | 'h' | 'q') => self.help = None,
-                KeyCode::Down => *scroll = (*scroll + 1).min(self.help_limit),
-                KeyCode::PageDown => *scroll = (*scroll + 8).min(self.help_limit),
-                KeyCode::Up => *scroll = scroll.saturating_sub(1),
-                KeyCode::PageUp => *scroll = scroll.saturating_sub(8),
+                KeyCode::Right | KeyCode::Tab => {
+                    help.tab = (help.tab + 1) % HELP_TITLES.len();
+                    help.scroll = 0;
+                }
+                KeyCode::Left | KeyCode::BackTab => {
+                    help.tab = (help.tab + HELP_TITLES.len() - 1) % HELP_TITLES.len();
+                    help.scroll = 0;
+                }
+                KeyCode::Home => {
+                    help.tab = 0;
+                    help.scroll = 0;
+                }
+                KeyCode::End => {
+                    help.tab = HELP_TITLES.len() - 1;
+                    help.scroll = 0;
+                }
+                KeyCode::Down => help.scroll = (help.scroll + 1).min(self.help_limit),
+                KeyCode::PageDown => help.scroll = (help.scroll + 8).min(self.help_limit),
+                KeyCode::Up => help.scroll = help.scroll.saturating_sub(1),
+                KeyCode::PageUp => help.scroll = help.scroll.saturating_sub(8),
                 _ => {}
             }
             return Ok(false);
@@ -492,7 +529,7 @@ impl App {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Char('?' | 'h') | KeyCode::F(1) => self.help = Some(0),
+            KeyCode::Char('?' | 'h') | KeyCode::F(1) => self.help = Some(Help::default()),
             KeyCode::Char('s') if !ctrl => self.begin_sort(),
             KeyCode::F(6) => self.begin_sort(),
             KeyCode::Char('w') if !ctrl => self.begin_sheet(),
@@ -756,13 +793,15 @@ impl App {
 
     fn draw(&self, frame: &mut Frame, p: &Progress, columns: usize) {
         let areas = screen_layout(frame.area());
-        let blue = Style::default().fg(Color::White).bg(Color::Blue);
+        let grid = Style::default().fg(GRID_FG).bg(GRID_BG);
+        let bar = Style::default().fg(BAR_FG).bg(BAR_BG);
+        frame.render_widget(Block::new().style(grid), frame.area());
         frame.render_widget(
             Paragraph::new(format!(
                 " Quadrille  {}",
                 safe(&self.sheet.path.display().to_string())
             ))
-            .style(blue),
+            .style(bar),
             areas[0],
         );
         let mut header = vec![Cell::from("Row")];
@@ -790,7 +829,7 @@ impl App {
         let rows = self.rows.iter().enumerate().map(|(r, record)| {
             let number = self.top + r as u64;
             let mut cells = vec![
-                Cell::from((number + 1).to_string()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from((number + 1).to_string()).style(Style::default().fg(ROW_FG).bg(GRID_BG)),
             ];
             for col in self.left..self.left + columns {
                 let text = record
@@ -799,13 +838,16 @@ impl App {
                     .unwrap_or("");
                 let style = if number == self.row && col == self.col {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(SELECTED_FG)
+                        .bg(SELECTED_BG)
                         .add_modifier(Modifier::BOLD)
                 } else if self.sheet.is_edited(number, col) {
-                    Style::default().fg(Color::Yellow)
-                } else {
                     Style::default()
+                        .fg(EDITED_FG)
+                        .bg(GRID_BG)
+                        .add_modifier(Modifier::UNDERLINED)
+                } else {
+                    grid
                 };
                 cells.push(Cell::from(safe(text)).style(style));
             }
@@ -814,16 +856,21 @@ impl App {
         let widths = std::iter::once(Constraint::Length(10))
             .chain((0..columns).map(|_| Constraint::Length(self.width)));
         let table = Table::new(rows, widths)
+            .style(grid)
             .flex(Flex::Start)
-            .header(Row::new(header).style(blue))
-            .block(Block::bordered().title(match self.sheet.sheet_name() {
-                Some(name) => format!(
-                    " {} · {} · w Sheets · edits are text · formulas read-only ",
-                    self.sheet.format(),
-                    safe(name)
-                ),
-                None => " CSV · all cells are text ".into(),
-            }));
+            .header(Row::new(header).style(bar))
+            .block(
+                Block::bordered()
+                    .style(grid)
+                    .title(match self.sheet.sheet_name() {
+                        Some(name) => format!(
+                            " {} · {} · w Sheets · edits are text · formulas read-only ",
+                            self.sheet.format(),
+                            safe(name)
+                        ),
+                        None => " CSV · all cells are text ".into(),
+                    }),
+            );
         frame.render_widget(table, areas[1]);
         let cell = format!("{}{}", column_name(self.col), self.row + 1);
         let mut value = self.current().map(safe).unwrap_or_default();
@@ -831,7 +878,9 @@ impl App {
             value = format!("={} · cached: {value}", safe(formula));
         }
         frame.render_widget(
-            Paragraph::new(format!("{cell}: {value}")).wrap(Wrap { trim: false }),
+            Paragraph::new(format!("{cell}: {value}"))
+                .style(grid)
+                .wrap(Wrap { trim: false }),
             areas[2],
         );
         let percent = if p.total_bytes == 0 {
@@ -875,18 +924,21 @@ impl App {
                 }
             )
         };
-        frame.render_widget(Paragraph::new(safe(&status)).style(blue), areas[3]);
-        frame.render_widget(Paragraph::new(safe(&self.message)), areas[4]);
+        frame.render_widget(Paragraph::new(safe(&status)).style(bar), areas[3]);
+        frame.render_widget(Paragraph::new(safe(&self.message)).style(grid), areas[4]);
         let bar = FOOTER
             .iter()
             .map(|(_, label)| format!("{label:<12}"))
             .collect::<String>();
-        frame.render_widget(Paragraph::new(bar).style(blue), areas[5]);
+        frame.render_widget(
+            Paragraph::new(bar).style(Style::default().fg(BAR_FG).bg(BAR_BG)),
+            areas[5],
+        );
         if let Some(prompt) = &self.prompt {
             draw_prompt(frame, prompt);
         }
-        if let Some(scroll) = self.help {
-            draw_help(frame, scroll);
+        if let Some(help) = self.help {
+            draw_help(frame, help);
         }
     }
 }
@@ -898,6 +950,13 @@ const FOOTER: [(u8, &str); 5] = [
     (6, "F6 Sort"),
     (10, "F10 Quit"),
 ];
+
+#[derive(Clone, Copy, Default)]
+struct Help {
+    tab: usize,
+    scroll: u16,
+}
+
 const PLATFORM_HELP: &str = if cfg!(target_os = "macos") {
     "MACOS KEYBOARD\n\
 Ctrl means Control (⌃), not Command (⌘).\n\
@@ -911,11 +970,22 @@ Terminal shortcuts can intercept keys; Ctrl+G also jumps to a record."
 Ctrl means Control. Terminal shortcuts can intercept keys."
 };
 
-fn help_lines() -> impl Iterator<Item = &'static str> {
-    PLATFORM_HELP.lines().chain(HELP_LINES.iter().copied())
+const HELP_TITLES: [&str; 4] = ["Navigation", "Editing", "Sorting", "Workbooks"];
+
+fn help_lines(tab: usize) -> Vec<&'static str> {
+    match tab {
+        0 => PLATFORM_HELP
+            .lines()
+            .chain([""])
+            .chain(NAVIGATION_HELP.iter().copied())
+            .collect(),
+        1 => EDITING_HELP.to_vec(),
+        2 => SORTING_HELP.to_vec(),
+        _ => WORKBOOK_HELP.to_vec(),
+    }
 }
 
-const HELP_LINES: &[&str] = &[
+const NAVIGATION_HELP: &[&str] = &[
     "NAVIGATION",
     "Arrows / Tab / Shift+Tab   Move between cells",
     "PageUp / PageDown         Move one screen",
@@ -924,6 +994,7 @@ const HELP_LINES: &[&str] = &[
     "Ctrl+G                   Go to a record number",
     "+ / -                    Widen / narrow columns",
     "w                        Choose workbook sheet (save edits first)",
+    "",
     "MOUSE",
     "Click / drag             Select a cell",
     "Double-click             Edit a cell",
@@ -931,11 +1002,25 @@ const HELP_LINES: &[&str] = &[
     "Shift+wheel / sideways   Scroll columns",
     "Click column heading     Open sort dialog",
     "Click function-key bar   Run that command",
+    "",
+    "QUIT",
+    "q / Ctrl+Q / Ctrl+C / F10  Quit (confirm unsaved changes)",
+    "? / h / F1               Help; Esc closes help",
+];
+
+const EDITING_HELP: &[&str] = &[
     "EDIT AND SAVE",
     "Enter / F2               Edit selected cell",
     "Ctrl+Z                   Undo last cell edit",
     "Ctrl+S / F4              Save As (new file only)",
     "Editor: Ctrl+A select all; Ctrl+J newline; Enter apply; Esc cancel",
+    "",
+    "VALUES",
+    "Rows include the header. CSV values and new workbook edits are text.",
+    "Underlined yellow cells contain edits; amber marks the selected cell.",
+];
+
+const SORTING_HELP: &[&str] = &[
     "SORT",
     "s / F6                   Sort by one or more columns",
     "B,-D:n                   B text ascending, then D numeric descending",
@@ -945,10 +1030,12 @@ const HELP_LINES: &[&str] = &[
     "Sort uses current values; editing a key does not automatically re-sort.",
     "Save As writes visible order; sorted saves normalize record endings to LF.",
     "Empty/missing keys sort last. Numeric keys require exact decimals.",
-    "QUIT",
-    "q / Ctrl+Q / Ctrl+C / F10  Quit (confirm unsaved changes)",
-    "? / h / F1               Help; Esc closes help",
-    "Rows include the header. CSV values and new workbook edits are text.",
+];
+
+const WORKBOOK_HELP: &[&str] = &[
+    "WORKBOOKS",
+    "w                        Choose an XLSX / ODS sheet",
+    "Save workbook edits before switching sheets.",
     "Workbooks: formulas are read-only cached results; qd does not recalculate.",
     "Native saves preserve the workbook; clear sorting first. Export views as .csv.",
 ];
@@ -980,9 +1067,21 @@ fn help_area(area: Rect) -> Rect {
     )
 }
 
-fn draw_help(frame: &mut Frame, scroll: u16) {
+fn help_layout(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(help_area(area).inner(Margin::new(2, 2)))
+}
+
+fn draw_help(frame: &mut Frame, help: Help) {
     let popup = help_area(frame.area());
-    let lines: Vec<_> = help_lines()
+    let areas = help_layout(frame.area());
+    let background = Style::default().fg(PANEL_FG).bg(PANEL_BG);
+    let lines: Vec<_> = help_lines(help.tab)
+        .into_iter()
         .map(|text| {
             let style = if matches!(
                 text,
@@ -991,11 +1090,14 @@ fn draw_help(frame: &mut Frame, scroll: u16) {
                     | "NAVIGATION"
                     | "MOUSE"
                     | "EDIT AND SAVE"
+                    | "VALUES"
                     | "SORT"
                     | "QUIT"
+                    | "WORKBOOKS"
             ) {
                 Style::default()
-                    .fg(Color::LightCyan)
+                    .fg(PANEL_ACCENT)
+                    .bg(PANEL_BG)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -1005,16 +1107,31 @@ fn draw_help(frame: &mut Frame, scroll: u16) {
         .collect();
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(Color::White).bg(Color::Rgb(24, 48, 96)))
-            .block(
-                Block::bordered()
-                    .border_style(Style::default().fg(Color::LightBlue))
-                    .title(" Commands · ↑↓ / wheel scroll · Esc close "),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
+        Block::bordered()
+            .style(background)
+            .border_style(Style::default().fg(PANEL_BORDER).bg(PANEL_BG))
+            .title(" Commands · ←/→ tabs · ↑/↓ / wheel scroll · Esc close "),
         popup,
+    );
+    frame.render_widget(
+        Tabs::new(HELP_TITLES)
+            .select(help.tab)
+            .divider(" │ ")
+            .style(background)
+            .highlight_style(
+                Style::default()
+                    .fg(PANEL_ACCENT)
+                    .bg(PANEL_BG)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+        areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(background)
+            .wrap(Wrap { trim: false })
+            .scroll((help.scroll, 0)),
+        areas[2],
     );
 }
 
@@ -1037,7 +1154,11 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
         Action::Sheet => " Sheet · ↑/↓ or name/number · Enter open · Esc cancel ",
     };
     frame.render_widget(Clear, popup);
-    let block = Block::bordered().title(title);
+    let panel = Style::default().fg(PANEL_FG).bg(PANEL_BG);
+    let block = Block::bordered()
+        .style(panel)
+        .border_style(Style::default().fg(PANEL_BORDER).bg(PANEL_BG))
+        .title(title);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
@@ -1047,17 +1168,23 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
     let cursor_width = UnicodeWidthStr::width(before.as_str());
     let scroll = cursor_width.saturating_sub(inner.width.saturating_sub(1) as usize);
     let display = safe(&prompt.text);
-    let style = if prompt.select_all {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
-    } else {
+    let input = Style::default().fg(INPUT_FG).bg(INPUT_BG);
+    let text = if prompt.select_all {
         Style::default()
+            .fg(INPUT_SELECTED_FG)
+            .bg(INPUT_SELECTED_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        input
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(display))
-            .style(style)
-            .scroll((0, scroll.min(u16::MAX as usize) as u16)),
-        inner,
-    );
+    if prompt.action != Action::Quit {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(display, text)))
+                .style(input)
+                .scroll((0, scroll.min(u16::MAX as usize) as u16)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+    }
     if prompt.action != Action::Quit {
         frame.set_cursor_position((inner.x + (cursor_width - scroll) as u16, inner.y));
     }
@@ -1075,7 +1202,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
             .collect::<Vec<_>>()
             .join("\n");
         frame.render_widget(
-            Paragraph::new(names).scroll((
+            Paragraph::new(names).style(panel).scroll((
                 selected
                     .saturating_sub(inner.height.saturating_sub(3) as usize)
                     .min(u16::MAX as usize) as u16,
@@ -1089,17 +1216,19 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt) {
             Paragraph::new(format!(
                 "B,-D:n = B text ↑, D numeric ↓ · F2 Header: {}",
                 if prompt.header { "ON" } else { "OFF" }
-            )),
+            ))
+            .style(panel),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
         frame.render_widget(
-            Paragraph::new("Enter clear to restore source order · saves follow the visible order"),
+            Paragraph::new("Enter clear to restore source order · saves follow the visible order")
+                .style(panel),
             Rect::new(inner.x, inner.y + 2, inner.width, 1),
         );
     }
     if inner.height > 2 && prompt.action == Action::Edit {
         frame.render_widget(
-            Paragraph::new("Typing replaces selection · ←/→ move · Ctrl+A select all"),
+            Paragraph::new("Typing replaces selection · ←/→ move · Ctrl+A select all").style(panel),
             Rect::new(inner.x, inner.y + 2, inner.width, 1),
         );
     }
@@ -1134,6 +1263,52 @@ fn column_name(mut col: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    fn contrast(foreground: Color, background: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("Accessibility palette colors must be explicit RGB")
+            };
+            [red, green, blue]
+                .into_iter()
+                .zip([0.2126, 0.7152, 0.0722])
+                .map(|(channel, weight)| {
+                    let channel = f64::from(channel) / 255.0;
+                    weight
+                        * if channel <= 0.04045 {
+                            channel / 12.92
+                        } else {
+                            ((channel + 0.055) / 1.055).powf(2.4)
+                        }
+                })
+                .sum()
+        }
+        let (light, dark) = {
+            let a = luminance(foreground);
+            let b = luminance(background);
+            (a.max(b), a.min(b))
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    #[test]
+    fn palette_has_enhanced_text_contrast_and_visible_boundaries() {
+        for (foreground, background) in [
+            (GRID_FG, GRID_BG),
+            (ROW_FG, GRID_BG),
+            (EDITED_FG, GRID_BG),
+            (SELECTED_FG, SELECTED_BG),
+            (BAR_FG, BAR_BG),
+            (PANEL_FG, PANEL_BG),
+            (PANEL_ACCENT, PANEL_BG),
+            (INPUT_FG, INPUT_BG),
+            (INPUT_SELECTED_FG, INPUT_SELECTED_BG),
+        ] {
+            assert!(contrast(foreground, background) >= 7.0);
+        }
+        assert!(contrast(PANEL_BORDER, PANEL_BG) >= 3.0);
+        assert!(contrast(SELECTED_BG, GRID_BG) >= 3.0);
+    }
 
     #[test]
     fn unicode_edit_and_small_terminal_render() {
@@ -1182,6 +1357,20 @@ mod tests {
                 .unwrap();
             assert!(app.help.is_none());
         }
+        app.key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            19,
+            &p,
+        )
+        .unwrap();
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), 19, &p)
+            .unwrap();
+        assert_eq!(app.help.unwrap().tab, 1);
+        app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), 19, &p)
+            .unwrap();
+        assert_eq!(app.help.unwrap().tab, 0);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 19, &p)
+            .unwrap();
         let screen = Rect::new(0, 0, 110, 28);
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1233,7 +1422,11 @@ mod tests {
         for (w, h) in [(1, 1), (20, 5), (110, 28)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| app.draw(f, &p, 3)).unwrap();
-            terminal.draw(|f| draw_help(f, 0)).unwrap();
+            for tab in 0..HELP_TITLES.len() {
+                terminal
+                    .draw(|f| draw_help(f, Help { tab, scroll: 0 }))
+                    .unwrap();
+            }
         }
     }
 }
