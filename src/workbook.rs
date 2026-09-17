@@ -355,8 +355,12 @@ pub(crate) fn open(path: &Path, name: Option<&str>) -> Result<Sheet> {
     preflight(&doc, &format)?;
     let mut protected = Vec::new();
     let mut text_overrides = BTreeMap::new();
+    let mut has_formulas = format == "ods";
     if format == "xlsx" {
         for node in doc.descendants() {
+            if node.tag_name().name() == "f" {
+                has_formulas = true;
+            }
             if node.tag_name().name() == "mergeCell"
                 || (node.tag_name().name() == "f" && node.attribute("t") == Some("array"))
             {
@@ -432,20 +436,25 @@ pub(crate) fn open(path: &Path, name: Option<&str>) -> Result<Sheet> {
     drop(zip);
     let mut book = calamine::open_workbook_auto(&source)?;
     let values = book.worksheet_range(&selected.0)?;
-    let formula_range = book.worksheet_formula(&selected.0)?;
     let mut formulas = BTreeMap::new();
-    if let Some((r, c)) = formula_range.start() {
-        for (row, col, formula) in formula_range.used_cells() {
-            formulas.insert(
-                (r as u64 + row as u64, c as usize + col),
-                formula.to_owned(),
-            );
+    let formula_end = if has_formulas {
+        let formula_range = book.worksheet_formula(&selected.0)?;
+        if let Some((r, c)) = formula_range.start() {
+            for (row, col, formula) in formula_range.used_cells() {
+                formulas.insert(
+                    (r as u64 + row as u64, c as usize + col),
+                    formula.to_owned(),
+                );
+            }
         }
-    }
+        formula_range.end()
+    } else {
+        None
+    };
     let end = values
         .end()
         .into_iter()
-        .chain(formula_range.end())
+        .chain(formula_end)
         .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
     let mut cache = tempfile::NamedTempFile::new()?;
     let mut writer = csv::Writer::from_writer(cache.as_file_mut());
