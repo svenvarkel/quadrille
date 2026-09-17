@@ -207,7 +207,7 @@ Import uses [calamine](https://github.com/tafia/calamine) and a temporary CSV so
 existing navigation, edits, undo and sorting engine is shared. The import happens
 before the TUI opens and temporarily holds workbook data in memory; XLSX reads the
 selected sheet, while ODS loads all sheets. Current limits: **256 MiB uncompressed
-package size**, **128 MiB per XML member**, **2 million XML nodes per parsed part**,
+package size**, **128 MiB per XML member**, **8 million XML nodes per parsed part**,
 and **5 million cells per sheet rectangle**, including leading empty cells. These
 are admission limits, not a total process memory cap. CSV retains its large-file
 path and has none of these workbook limits. `--check` reports indexed cache bytes

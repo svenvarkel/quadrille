@@ -13,6 +13,7 @@ const TEXT: &str = "urn:oasis:names:tc:opendocument:xmlns:text:1.0";
 const XML_LIMIT: u64 = 128 * 1024 * 1024;
 const PACKAGE_LIMIT: u64 = 256 * 1024 * 1024;
 const CELL_LIMIT: u64 = 5_000_000;
+const NODE_LIMIT: u32 = 8_000_000;
 type Address = (u64, usize);
 type CellRange = (Address, Address);
 
@@ -43,7 +44,7 @@ fn xml(text: &str) -> Result<Document<'_>> {
     Ok(Document::parse_with_options(
         text,
         ParsingOptions {
-            nodes_limit: 2_000_000,
+            nodes_limit: NODE_LIMIT,
             ..ParsingOptions::default()
         },
     )?)
