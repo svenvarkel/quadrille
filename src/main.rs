@@ -350,7 +350,7 @@ impl App {
             let cols = self
                 .rows
                 .get((self.row - self.top) as usize)
-                .map_or(1, |r| r.len())
+                .map_or(1, |record| self.sheet.editable_columns(record.len()))
                 .max(1);
             self.col = self.col.min(cols - 1);
             if self.col < self.left {
@@ -389,11 +389,8 @@ impl App {
     }
 
     fn current(&self) -> Option<&str> {
-        let value = self
-            .rows
-            .get((self.row - self.top) as usize)?
-            .get(self.col)?;
-        Some(self.sheet.value(self.row, self.col, value))
+        let record = self.rows.get((self.row - self.top) as usize)?;
+        self.sheet.cell_value(self.row, self.col, record)
     }
 
     fn key(&mut self, key: KeyEvent, height: usize, p: &Progress) -> Result<bool> {
@@ -447,11 +444,17 @@ impl App {
                 match prompt.action {
                     Action::Edit => {
                         let changed = self.current().is_some_and(|value| value != prompt.text);
+                        let is_formula =
+                            self.sheet.format() == "XLSX" && prompt.text.starts_with('=');
                         match self.sheet.set(self.row, self.col, prompt.text) {
                             Ok(()) if changed => {
                                 self.unsaved = true;
                                 self.saved_workbook = None;
-                                self.message = "Cell updated · Ctrl+Z undo".into();
+                                self.message = if is_formula {
+                                    "Formula updated · calculated when the saved file opens".into()
+                                } else {
+                                    "Cell updated · Ctrl+Z undo".into()
+                                };
                             }
                             Ok(()) => {}
                             Err(error) => self.message = error.to_string(),
@@ -742,7 +745,7 @@ impl App {
                 if self
                     .rows
                     .get((row - self.top) as usize)
-                    .and_then(|r| r.get(col))
+                    .and_then(|record| self.sheet.cell_value(row, col, record))
                     .is_none()
                 {
                     return Ok(false);
@@ -830,10 +833,7 @@ impl App {
                 Cell::from((number + 1).to_string()).style(Style::default().fg(ROW_FG).bg(GRID_BG)),
             ];
             for col in self.left..self.left + columns {
-                let text = record
-                    .get(col)
-                    .map(|v| self.sheet.value(number, col, v))
-                    .unwrap_or("");
+                let text = self.sheet.cell_value(number, col, record).unwrap_or("");
                 let style = if number == self.row && col == self.col {
                     Style::default()
                         .fg(SELECTED_FG)
@@ -862,9 +862,14 @@ impl App {
                     .style(grid)
                     .title(match self.sheet.sheet_name() {
                         Some(name) => format!(
-                            " {} · {} · w Sheets · edits are text · formulas read-only ",
+                            " {} · {} · w Sheets · {} ",
                             self.sheet.format(),
-                            safe(name)
+                            safe(name),
+                            if self.sheet.format() == "XLSX" {
+                                "=… creates formula · existing formulas read-only"
+                            } else {
+                                "edits are text · formulas read-only"
+                            }
                         ),
                         None => " CSV · all cells are text ".into(),
                     }),
@@ -873,7 +878,11 @@ impl App {
         let cell = format!("{}{}", column_name(self.col), self.row + 1);
         let mut value = self.current().map(safe).unwrap_or_default();
         if let Some(formula) = self.sheet.formula(self.row, self.col) {
-            value = format!("={} · cached: {value}", safe(formula));
+            value = if self.sheet.is_edited(self.row, self.col) {
+                format!("={} · calculated when saved file opens", safe(formula))
+            } else {
+                format!("={} · cached: {value}", safe(formula))
+            };
         }
         frame.render_widget(
             Paragraph::new(format!("{cell}: {value}"))
@@ -1034,7 +1043,9 @@ const WORKBOOK_HELP: &[&str] = &[
     "WORKBOOKS",
     "w                        Choose an XLSX / ODS sheet",
     "Save workbook edits before switching sheets.",
-    "Workbooks: formulas are read-only cached results; qd does not recalculate.",
+    "XLSX: move one column past the data and type =… to create a formula.",
+    "Excel/LibreOffice calculates new formulas when the saved file opens.",
+    "Existing formula cells remain read-only; qd does not recalculate.",
     "Native saves preserve the workbook; clear sorting first. Export views as .csv.",
 ];
 

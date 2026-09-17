@@ -81,6 +81,9 @@ with tempfile.TemporaryDirectory(prefix='quadrille-workbook-tui-') as tmp:
             send(b'1\r')  # Switch into Data from the newly saved workbook.
             send(b'\x1b[B\x1b[C\x1b[C\r')  # C2
             send(b'Changed data\r')
+            if ext == 'xlsx':
+                send(b'\x1b[C\x1b[C\r')  # New trailing cell E2.
+                send(b'=SUM(B2:B3)\r')
             send(b'\x13\r')
             saved3 = saved2.with_name(f'notes-edited.edited.{ext}')
             deadline = time.monotonic() + 5
@@ -88,6 +91,11 @@ with tempfile.TemporaryDirectory(prefix='quadrille-workbook-tui-') as tmp:
                 collect()
             assert read(saved3, 'Data', 'C2') == 'Changed data'
             assert read(saved3, 'Notes õ', 'B3') == 'Changed note'
+            if ext == 'xlsx':
+                formula = subprocess.run(
+                    [binary, str(saved3), '--sheet', 'Data', '--read', 'E2'],
+                    capture_output=True, check=True)
+                assert json.loads(formula.stdout)['formulas']['E2'] == 'SUM(B2:B3)'
             assert source.read_bytes() == original
             send(b'q')
             assert process.wait(timeout=3) == 0

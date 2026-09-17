@@ -511,6 +511,16 @@ impl Workbook {
         if value.chars().any(|c| !matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')) {
             return Err("Workbook text contains a character forbidden by XML 1.0".into());
         }
+        if self.format == "XLSX" && value == "=" {
+            return Err("Enter a formula after =".into());
+        }
+        if self.format == "XLSX"
+            && value
+                .strip_prefix('=')
+                .is_some_and(|formula| formula.encode_utf16().count() > 8_192)
+        {
+            return Err("XLSX formulas are limited to 8,192 UTF-16 code units".into());
+        }
         if self.format == "XLSX" && value.encode_utf16().count() > 32_767 {
             return Err("XLSX cell text is limited to 32,767 UTF-16 code units".into());
         }
@@ -666,8 +676,22 @@ fn xlsx_cell(
     value: &str,
 ) -> Result<String> {
     let c = qualified(node.unwrap_or(parent), "c");
+    let f = qualified(parent, "f");
     let is = qualified(parent, "is");
     let t = qualified(parent, "t");
+    let tail: String = node
+        .into_iter()
+        .flat_map(|n| n.children())
+        .filter(|n| n.is_element() && !matches!(n.tag_name().name(), "v" | "is" | "f"))
+        .map(|n| &text[n.range()])
+        .collect();
+    if let Some(formula) = value.strip_prefix('=') {
+        let start = match node {
+            Some(n) => start_tag(n, text, &[("", "t")], "")?,
+            None => format!("<{c} r=\"{}\">", a1(at)),
+        };
+        return Ok(format!("{start}<{f}>{}</{f}>{tail}</{c}>", escape(formula)));
+    }
     // OOXML escape-looking literals must be escaped before writing inline text.
     let mut literal = String::new();
     for (i, ch) in value.char_indices() {
@@ -688,12 +712,6 @@ fn xlsx_cell(
         None => format!("<{c} r=\"{}\" t=\"inlineStr\">", a1(at)),
     };
     // Keep non-value children such as extension metadata intact.
-    let tail: String = node
-        .into_iter()
-        .flat_map(|n| n.children())
-        .filter(|n| n.is_element() && !matches!(n.tag_name().name(), "v" | "is" | "f"))
-        .map(|n| &text[n.range()])
-        .collect();
     Ok(format!(
         "{start}<{is}><{t} xml:space=\"preserve\">{}</{t}></{is}>{tail}</{c}>",
         escape(&literal)
@@ -707,6 +725,24 @@ fn patch_xlsx(doc: &Document<'_>, text: &str, edits: &Edits) -> Result<String> {
         .ok_or("Missing XLSX sheetData")?;
     let mut changes = Vec::new();
     let mut remaining = edits.clone();
+    if let Some(dimension) = doc
+        .descendants()
+        .find(|node| node.tag_name().name() == "dimension")
+    {
+        if let Some(reference) = dimension.attribute_node("ref") {
+            let (first, mut last) = cell_range(reference.value())?;
+            let original = last;
+            for &(row, col) in edits.keys() {
+                last = (last.0.max(row), last.1.max(col));
+            }
+            if last != original {
+                changes.push((
+                    reference.range(),
+                    format!("ref=\"{}:{}\"", a1(first), a1(last)),
+                ));
+            }
+        }
+    }
     for row in data.children().filter(|n| n.tag_name().name() == "row") {
         let number = row
             .attribute("r")

@@ -176,11 +176,40 @@ impl Sheet {
     }
 
     pub fn formula(&self, row: u64, col: usize) -> Option<&str> {
-        self.workbook
-            .as_ref()?
-            .formulas
-            .get(&(self.source_row(row), col))
-            .map(String::as_str)
+        let workbook = self.workbook.as_ref()?;
+        let row = self.source_row(row);
+        if workbook.format == "XLSX" {
+            if let Some(value) = self.edits.get(&(row, col)) {
+                return value
+                    .strip_prefix('=')
+                    .filter(|formula| !formula.is_empty());
+            }
+        }
+        workbook.formulas.get(&(row, col)).map(String::as_str)
+    }
+
+    pub fn editable_columns(&self, existing: usize) -> usize {
+        existing
+            + usize::from(
+                existing < 16_384
+                    && self
+                        .workbook
+                        .as_ref()
+                        .is_some_and(|workbook| workbook.format == "XLSX"),
+            )
+    }
+
+    pub fn cell_value<'a>(
+        &'a self,
+        row: u64,
+        col: usize,
+        record: &'a csv::StringRecord,
+    ) -> Option<&'a str> {
+        let original = record.get(col).or_else(|| {
+            (col == record.len() && self.editable_columns(record.len()) > record.len())
+                .then_some("")
+        })?;
+        Some(self.value(row, col, original))
     }
 
     fn data_path(&self) -> &Path {
@@ -265,7 +294,12 @@ impl Sheet {
         let rows = self.window(row, 1)?;
         let original = rows
             .first()
-            .and_then(|r| r.get(col))
+            .and_then(|record| {
+                record.get(col).or_else(|| {
+                    (col == record.len() && self.editable_columns(record.len()) > record.len())
+                        .then_some("")
+                })
+            })
             .ok_or("No cell at this position")?;
         if self.value(row, col, original) == value {
             return Ok(());
@@ -443,9 +477,13 @@ fn save(
                 if next_row != row {
                     break;
                 }
-                *values
-                    .get_mut(col)
-                    .ok_or("Edited column no longer exists")? = value.clone();
+                if col == values.len() && workbook.is_some() {
+                    values.push(value.clone());
+                } else {
+                    *values
+                        .get_mut(col)
+                        .ok_or("Edited column no longer exists")? = value.clone();
+                }
                 edits.next();
             }
             copy_bytes(&mut input, &mut output, start - cursor, progress)?;

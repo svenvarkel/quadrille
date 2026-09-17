@@ -48,7 +48,8 @@ Enter / F2 edit, Ctrl+Z undo, Ctrl+S / F4 save as, +/- column width,
 q / Ctrl+Q quit. In an editor: Ctrl+A select all, Ctrl+J insert newline.
 
 Workbooks: --sheet selects one sheet; --sheets lists them. Values are read as
-text; edits are literal text. Formulas are read-only, with cached results only.
+text. In XLSX, edits beginning with = create formulas; existing formulas are
+read-only, with cached results only. One new trailing XLSX column can be edited.
 Native saves preserve other sheets/styles and require source row order.
 Use a .csv destination to export the selected sheet, including a sorted view.
 
@@ -288,10 +289,7 @@ pub fn open() -> Result<Option<Sheet>> {
     let mut changes = BTreeMap::new();
     for ((row, col), value) in edits {
         let records = sheet.window(row, 1)?;
-        let original = records
-            .first()
-            .and_then(|r| r.get(col))
-            .ok_or_else(|| format!("No cell at {}{}", super::column_name(col), row + 1))?;
+        let original = records.first().and_then(|r| r.get(col)).unwrap_or("");
         changes
             .entry((row, col))
             .or_insert_with(|| (original.to_owned(), String::new()))
@@ -305,8 +303,10 @@ pub fn open() -> Result<Option<Sheet>> {
     if let Some(name) = sheet.sheet_name() {
         result["sheet"] = json!(name);
         result["format"] = json!(sheet.format());
-        result["formula_results"] = json!("cached; not recalculated by qd");
-        result["edit_type"] = json!("text");
+        result["formula_results"] = json!(
+            "existing results are cached; new formulas are calculated when the saved file opens"
+        );
+        result["edit_type"] = json!("text; XLSX values beginning with = are formulas");
     }
     if let Some(spec) = &sort {
         let job = sheet.start_sort(parse_sort(spec)?, header)?;
@@ -322,8 +322,9 @@ pub fn open() -> Result<Option<Sheet>> {
             .map(|(i, row)| {
                 (range.first.1..=range.last.1)
                     .map(|col| {
-                        row.get(col)
-                            .map(|value| json!(sheet.value(range.first.0 + i as u64, col, value)))
+                        sheet
+                            .cell_value(range.first.0 + i as u64, col, row)
+                            .map(|value| json!(value))
                             .unwrap_or(Value::Null)
                     })
                     .collect()

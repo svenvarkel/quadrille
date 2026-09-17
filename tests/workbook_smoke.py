@@ -106,13 +106,20 @@ def main():
 
             changed = '  New, "quoted" & <õ>\ncity\t 🦀\r_x0041_'
             dest = root / f'edited.{ext}'
-            edits = ['--set', 'C2', changed, '--set', 'B2', '00100', '--set', 'B4', '=1+1', '--set', 'C3', '']
+            edits = ['--set', 'C2', changed, '--set', 'B2', '00100', '--set', 'B4', 'literal =1+1', '--set', 'C3', '']
+            if ext == 'xlsx':
+                edits += ['--set', 'E2', '=SUM(B2:B3)']
+                preview = qd(source, '--set', 'E2', '=SUM(B2:B3)', '--dry-run', '--read', 'E2')
+                assert preview['rows'] == [['=SUM(B2:B3)']] and preview['formulas']['E2'] == 'SUM(B2:B3)'
             qd(source, *edits, '--output', dest)
             assert source.read_bytes() == original
             assert qd(dest, '--read', 'B2:C2')['rows'] == [['00100', changed]]
-            assert qd(dest, '--read', 'B4')['rows'] == [['=1+1']]
+            assert qd(dest, '--read', 'B4')['rows'] == [['literal =1+1']]
             assert qd(dest, '--read', 'C3')['rows'] == [['']]
             assert qd(dest, '--read', formula_at)['formulas'] == result['formulas']
+            if ext == 'xlsx':
+                created = qd(dest, '--read', 'E2')
+                assert created['rows'] == [['']] and created['formulas']['E2'] == 'SUM(B2:B3)'
             qd(source, *edits, '--output', dest, ok=False)
             qd(source, *edits, '--output', source, ok=False)
             qd(source, '--output', root / 'bad.ods' if ext == 'xlsx' else root / 'bad.xlsx', ok=False)
@@ -125,6 +132,9 @@ def main():
                 if ext == 'xlsx':
                     b2 = edited_xml.find(f'.//{{{X}}}c[@r="B2"]')
                     assert b2.attrib['s'] == '1' and b2.attrib['t'] == 'inlineStr'
+                    e2 = edited_xml.find(f'.//{{{X}}}c[@r="E2"]')
+                    assert e2.find(f'{{{X}}}f').text == 'SUM(B2:B3)' and e2.find(f'{{{X}}}v') is None
+                    assert edited_xml.find(f'{{{X}}}dimension').attrib['ref'] == 'A1:E5'
                     assert edited_xml.find(f'.//{{{X}}}autoFilter').attrib['ref'] == 'A1:D5'
                 else:
                     assert z.infolist()[0].filename == 'mimetype' and z.infolist()[0].compress_type == ZIP_STORED

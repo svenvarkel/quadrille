@@ -175,20 +175,23 @@ then opens the chosen sheet from that saved copy, retaining previous sheet edits
 CSV export leaves pending workbook edits unsaved.
 
 Cell addresses match the workbook, including leading empty rows and columns.
-Blank cells inside the imported rectangle are editable. Expanding beyond its last
-used row/column, adding sheets, and inserting/deleting rows are not supported.
+Blank cells inside the imported rectangle are editable. XLSX also exposes one empty
+column after the imported rectangle, so a new trailing column can be added. Expanding
+rows, adding sheets, and inserting/deleting rows are not supported.
 
 Values are displayed and returned as strings. Numbers use the reader's numeric
 representation; Excel date cells currently show serial values, not formatted dates.
-**Every edit writes literal text**, including numeric-looking strings and `=...`.
+Edits write literal text, except that an XLSX value beginning with `=` creates a
+formula. For example, enter `=SUM(B2:N2)` in column O, then Save As `.xlsx`.
 Existing unedited cell types and number formats remain intact. This version does
-not offer typed numeric/date edits or create formulas.
+not offer typed numeric/date edits. ODS edits remain literal text.
 
 Formula cells show their cached results; the TUI preview also shows the formula,
 and CLI `--read` includes a `formulas` map. **qd does not recalculate formulas**;
 cached results may be missing or stale, including after edits to their inputs.
-Formula, merged and array-result cells are read-only. Use Excel/LibreOffice for
-recalculation. Values exported to CSV include those cached results.
+Existing formula, merged and array-result cells are read-only. New XLSX formulas
+have no cached result; Excel/LibreOffice calculates them when the saved file opens.
+Values exported to CSV include existing cached results and pending formula text.
 
 Native Save As (`.xlsx` to `.xlsx`, `.ods` to `.ods`) patches edited cells in the
 original ZIP/XML package. Other sheets, styles, formulas and unrelated package
