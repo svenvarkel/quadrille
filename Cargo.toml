@@ -3,7 +3,7 @@ name          = "quadrille"
 version       = "0.0.0"
 edition        = "2024"
 rust-version   = "1.85"
-description    = "Terminal spreadsheet for very large CSV files and xlsx/ods workbooks, with a complete CLI and MCP API."
+description    = "Large CSV cell editor with a terminal UI and a JSON command-line interface."
 license        = "MIT OR Apache-2.0"
 repository     = "https://github.com/svenvarkel/quadrille"
 homepage       = "https://quadrille.dev"
@@ -26,18 +26,23 @@ name = "qd"
 path = "src/main.rs"
 
 [dependencies]
+csv = "1.3"
+crossterm = "0.28"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
+tempfile = "3"
+unicode-width = "0.2"
 
 [profile.release]
 opt-level     = 3
 lto           = "fat"
 codegen-units = 1
-panic         = "abort"
 strip         = true
 
 # Benchmarks and property tests run in release-ish conditions but need unwinding
 # and debug symbols, so they get their own profile rather than fighting the above.
 [profile.bench]
 inherits = "release"
-panic    = "unwind"
 debug    = true
 strip    = false

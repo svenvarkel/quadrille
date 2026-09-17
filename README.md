@@ -1,134 +1,220 @@
 # Quadrille
 
-A terminal spreadsheet for files that are too big for a spreadsheet.
+A CSV cell editor for agents and humans, with a JSON CLI and a terminal UI. The first working version is deliberately
+small: browse, sort, edit, undo, and save a copy without loading the entire file into RAM.
 
-> **Status: pre-release.** `0.0.0` reserves the name. There is no working binary yet.
-> The design is settled and benchmarked; the implementation is starting. If you found
-> this looking for a tool to use today, come back later — or see [prior art](#prior-art)
-> for things that work now.
+## Run
 
----
+Requires Rust 1.85 or newer to build. Only the TUI needs an interactive terminal.
 
-## What it will do
+```sh
+cargo build --release
+./target/release/qd path/to/large.csv
+```
 
-Two distinct capabilities behind a format router, plus one architectural stance.
+For the local test dataset:
 
-**1. Edit CSV files larger than RAM.** Memory-mapped, sparsely indexed, streaming.
-Unbounded file size, constant memory, instant open. Edits are held in an overlay and
-written out as a streaming rewrite with an atomic rename — the source file is never
-modified in place.
+```sh
+./target/release/qd test-data/Stablewood_PMAP_HMDA_All_Data_20250415.csv
+```
 
-**2. Open and edit xlsx, ods and xls workbooks.** Fully materialized in memory, bounded
-by the formats' own ~1M row limit. Round-trip preserving: parts Quadrille does not model
-are kept intact and written back unchanged.
+Use `-d ';'` for semicolon-separated files or `-d tab` for TSV. Comma is the default;
+there is no delimiter or encoding autodetection.
 
-**3. Everything is reachable from the CLI and from MCP**, not just the keyboard. The TUI,
-the CLI and the MCP server are three thin dispatchers over one command core. Every
-operation is a serializable value, which means undo, macro recording, the CLI grammar,
-MCP tool calls and the audit log are all the same data structure.
+For a non-interactive scan with JSON record count, elapsed time, and sparse-index size:
 
-The interface is CUA — menu bar, function keys, framed dialogs, a status line. Closer to
-Norton Commander than to vim.
+```sh
+./target/release/qd --check path/to/large.csv
+```
 
-## Why it might be worth building
+## Agent CLI
 
-The interesting gap is not "a spreadsheet in the terminal" — several of those exist. It
-is the intersection nobody covers:
+```sh
+# Read a range; every existing field is a JSON string, including numbers.
+./target/release/qd large.csv --read A1:D20
 
-|                      | terminal | edits | larger than RAM |
-| -------------------- | :------: | :---: | :-------------: |
-| csvlens              |    ✓     |   ✗   |        ✓        |
-| sc-im, TironCalc     |    ✓     |   ✓   |        ✗        |
-| Modern CSV           |    ✗     |   ✓   |     partial     |
-| EmEditor             |    ✗     |   ✓   |    ✓ (Windows)  |
-| duckdb               |    ✓     |   ✗   |  ✓ (not an editor) |
-| **Quadrille**        |  **✓**   | **✓** |      **✓**      |
+# Preview a change without creating an output file.
+./target/release/qd large.csv --set B7 '00123' --dry-run
 
-## Measured, not assumed
+# Apply a batch, then publish a new file.
+./target/release/qd large.csv --apply changes.json --output corrected.csv
+```
 
-The core performance claim was benchmarked before any code was committed.
-1.00 GB / 12,000,001 row CSV, one core:
+`changes.json` is an array of explicit cell edits:
 
-| Metric                               | Result             |
-| ------------------------------------ | ------------------ |
-| Sparse newline index (stride 64)     | **0.21 s, 1.5 MB RAM** |
-| Dense index, for comparison          | 0.52 s, 96 MB RAM  |
-| Random row seek                      | **1.46 µs**        |
-| Viewport parse, 50 rows              | **3.2 µs**         |
-| Throughput, warm / cold-ish          | 4.02 / 1.94 GB/s   |
+```json
+[
+  {"cell": "B7", "value": "00123"},
+  {"cell": "C9", "value": "A multiline\nvalue"}
+]
+```
 
-Scanning is not the bottleneck; sequential disk read is. A 5 GB file indexes in roughly
-1–3 seconds and costs about 7.5 MB of resident memory.
+`--set CELL VALUE` can also be repeated. Edits require `--dry-run` or `--output`.
+The JSON result includes the changed cells with their original and final values;
+no-op edits are omitted. Adding `--read` returns the selected rectangle **after**
+applying the edits. Missing fields in uneven records are represented as `null`;
+writing a nonexistent cell fails. Out-of-file ranges fail rather than truncate.
+Reads are limited to 100,000 cells and 10,000 records per call; request larger
+results in chunks. Read-only calls can finish before full-file indexing completes.
 
-One important caveat, stated up front because it is the project's biggest correctness
-risk: those numbers are for a naive newline scan. RFC 4180 permits newlines inside
-quoted fields, so the shipping scanner has to be quote-aware, which costs throughput.
-Measuring that is the first milestone gate, not an optimization to revisit later.
+All edits are checked before an output file is published. JSON goes to stdout,
+diagnostics to stderr, and failures return a nonzero exit status. `--output`
+without edits creates a byte-identical copy. Batch edits live in memory; this
+version is intended for targeted corrections, not millions of per-cell patches.
 
-## Correctness before speed
+## Controls
 
-A CSV editor that corrupts a 5 GB file once is finished. Two promises, and the second
-outranks the first:
+| Key | Action |
+| --- | --- |
+| ? / h / F1 | Open command help; Esc closes it |
+| s / F6 | Sort dialog; click a column heading to preselect it |
+| Arrow keys, Tab / Shift+Tab | Move between cells |
+| PageUp / PageDown | Move one screen |
+| Home / End | First / last column in the current record |
+| Ctrl+Home / Ctrl+End | First / last indexed record |
+| Ctrl+G | Go to a record number; wait for indexing if necessary |
+| Enter / F2 | Edit the selected cell |
+| Ctrl+Z | Undo the last cell edit |
+| Ctrl+S / F4 | Save to a **new** filename |
+| + / - | Widen / narrow columns |
+| q / Ctrl+Q / Ctrl+C / F10 | Quit; confirm if there are unsaved changes |
 
-1. A 5 GB CSV opens in under 2 seconds and edits without perceptible lag.
-2. **No file is ever silently corrupted.** Byte-exact round-trip for anything Quadrille
-   did not explicitly change. Leading zeros survive. A string that looks like a date
-   stays a string. Quoted multi-line fields are handled correctly. Encodings —
-   including Windows-1252 and CP1257 — are detected, displayed, and preserved.
+Help automatically includes Mac keyboard equivalents when running on macOS:
+Fn+Left / Right for Home / End, Fn+Up / Down for PageUp / PageDown, and
+Ctrl+Fn+Left / Right for the first / last indexed record. Ctrl means Control (⌃).
+Function keys may require Fn, depending on keyboard settings. Terminal shortcuts
+can intercept keys. Detection uses the OS running `qd`; over SSH, that is the
+remote host, not the keyboard's platform.
 
-Enforced by property tests (apply-then-undo returns the original bytes), fuzzing of the
-scanner and dialect sniffer, and a corpus of real-world malformed files.
+Mouse capture is enabled while the editor is open: click or drag to select a cell,
+double-click to edit, wheel to scroll vertically, and Shift+wheel or a horizontal
+wheel to move across columns. The bottom function-key bar is clickable. Mouse
+reporting must be supported by your terminal; capture is disabled on exit.
 
-## Non-goals
+In the editor, typing replaces the initially selected value. Use Left / Right to
+move the cursor and keep the existing text, Ctrl+A to select all, Ctrl+J to insert
+a newline, Enter to apply, and Esc to cancel. Bracketed paste supports multiline
+cell values. Control characters are shown as visible symbols in the grid.
 
-Charts. Pivot tables. Printing. WYSIWYG. A formula evaluator. Collaborative editing. A
-web UI. Plugins in v1. Writing `.xls`. Anything requiring a LibreOffice installation.
+Columns are labeled A, B, …, AA. Row 1 is the first CSV record, including the header
+if the file has one. Blank physical lines are skipped by the CSV reader, and a
+quoted multiline field belongs to one record. Yellow cells have edits; cyan marks
+the selected cell. The selected value is also previewed below the grid.
 
-Formula evaluation, if it ever arrives, will be delegated to an existing engine. It will
-never be reimplemented here.
+## Sorting
 
-## Roadmap
+Press **F6** (or `s`) and enter columns in priority order:
 
-| Phase | Deliverable |
-| ----- | ----------- |
-| 0     | Quote-aware sparse indexer, command core, property tests, fuzz harness |
-| 1     | CSV engine: overlay edits, sort, filter, streaming atomic save |
-| 2     | Format router, xlsx/ods backends, constant-memory conversion |
-| 3     | Complete CLI: grammar, JSON output, dry-run planning, machine-readable help |
-| 4     | MCP server with plan/diff/commit and a live view into an attached TUI |
-| 5–6   | TUI: grid, editing, menu bar, dialogs, command palette |
+- `B` — column B, ascending text order.
+- `-B` — column B, descending text order.
+- `B:n` — column B, ascending numeric order (`2` before `10`).
+- `B,-D:n` — B ascending as text, then D descending numerically.
 
-The CLI and MCP surfaces deliberately precede the TUI. If the project stalls after
-phase 4, what exists is still a useful headless tool.
+The first record stays in place as the header by default; **F2 inside the sort
+dialog** toggles this. Enter `clear` in the dialog to restore source order while
+keeping cell edits. **Esc** requests cancellation during a background sort. Cell
+editing and saving wait for the sort to finish; navigation and help remain usable.
+
+Text ordering is case-sensitive Unicode order. Numeric mode accepts exact plain
+decimals within a 96-bit coefficient / 28-digit scale; invalid or out-of-range
+numbers fail the sort rather than rounding them. Empty and missing keys sort last
+in either direction. Equal keys retain original source order. Sorting uses current
+cell edits, but subsequent edits do not automatically re-sort the view.
+
+The same operation is available to agents:
+
+```sh
+./target/release/qd large.csv --sort 'B,-D:n' --read A1:F20
+./target/release/qd large.csv --sort 'B:n' --output sorted.csv
+```
+
+Use `--no-header` to include the first record in sorting. When combined with edits,
+`--set` / `--apply` addresses always refer to **source** coordinates and are applied
+before sorting; `--read` addresses refer to the **sorted view**. The JSON result
+states this explicitly. In the TUI, edits address the visible cell and stay attached
+to its source record when the view is re-sorted or cleared.
+
+Sorting retains keys and record locations with an estimated **512 MiB key-building
+budget**. The full CSV is never loaded. Exceeding the budget leaves the previous
+view intact. This is not an overall process RSS cap: record buffers, edits, allocator
+overhead, and the current/resulting row orders also consume memory. Disk-backed
+sorting is not implemented yet. After sorting, the retained order uses 24 bytes per
+record; cancelling during comparison takes effect after that comparison phase.
+
+**Save As writes the visible sorted order.** Sorted output uses LF record endings,
+removes skipped blank lines, and retains an initial UTF-8 BOM. Unedited field bytes
+are copied; edited records may be requoted. Clear the sort before saving if you
+want the original order and original record-ending preservation.
+
+## What this version supports
+
+- UTF-8 CSV, with or without a BOM, including quoted delimiters, escaped quotes,
+  multiline fields, LF / CRLF record endings, and uneven record lengths.
+- All values remain text. Leading zeros and date-like strings are not converted.
+- Background indexing, with the first records available before the scan finishes.
+  Each index entry stores the byte offset of every 64th CSV record.
+- Only the visible records, edits, undo history, and sparse index are retained.
+  Memory therefore depends on record size, visible rows, edits, and record count;
+  it is **not** constant. No memory mapping is used in this version.
+- Background save with progress. Navigation stays available; further edits and
+  quitting wait until the save finishes.
+
+## Save behavior and limits
+
+Saves always create a new file. The default is `original.edited.csv` beside the
+source. Existing destinations, including the source itself, are refused. Output is
+written to a temporary file in the destination directory, flushed and synced, then
+published without overwriting an existing path. Detected source changes or write
+errors prevent publication.
+
+When no sort is active, unedited records are copied as raw bytes. **Edited records are reserialized**:
+field values and record endings are preserved, but optional quoting within those
+records may change. This is not yet byte-exact preservation of unedited fields
+inside an edited record. With no sort active, an unchanged save or a save after undoing all edits
+produces a byte-identical copy.
+
+After saving, the session still views the original file plus its edits; it does not
+switch to the new file. Further saves need another unused filename.
+
+The source must remain unchanged while open. Length, modification time, and (on
+Unix) file identity are checked, but there is no filesystem snapshot or exclusive
+lock. Save is enabled only after the entire file has been scanned successfully.
+Unsupported encodings produce an error rather than being silently transcoded.
+The underlying `csv` parser is permissive about malformed quoting: `--check` checks
+readability and UTF-8, **not** strict RFC 4180 conformance. Use well-formed CSV files
+for this proof of concept.
+
+This version has no formulas, filtering, row insertion/deletion, workbook
+formats, or MCP server. The CLI and TUI use the same editing engine, but separate
+processes do not share a live editing session. Very large individual
+records still require proportional memory, and large pasted edits/undo history
+are held in memory.
+
+## Development
+
+```sh
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+# After cargo build --release, on macOS/Linux:
+python3 tests/tui_smoke.py
+```
+
+Tests cover multiline and quoted fields, UTF-8, BOM and line endings, sparse seeks,
+copy/edit/undo round trips, source-change detection, refusal to overwrite existing
+files, CLI patches and dry runs, sorting with stable edit identity, mouse navigation,
+and terminal input/rendering. The original exploration is in
+[the technical and business analysis](docs/quadrille-analysis.md); its broader
+roadmap and preliminary performance estimates are not shipped capabilities.
 
 ## Prior art
 
-Worth your time today, and worth crediting:
-
-- [csvlens](https://github.com/YS-L/csvlens) — streaming CSV viewer, the reference for
-  large-file reading
-- [sc-im](https://github.com/andmarti1424/sc-im) — the mature terminal spreadsheet
-- [VisiData](https://www.visidata.org/) — data exploration across many formats
-- [IronCalc](https://github.com/ironcalc/IronCalc) / TironCalc — modern Rust spreadsheet
-  engine and its terminal skin
-- [l123](https://github.com/duane1024/l123) — a Lotus 1-2-3 R3.4a TUI, and a genuinely
-  impressive piece of specification work
-- [qsv](https://github.com/dathere/qsv), [duckdb](https://duckdb.org/) — where to go when
-  you want queries rather than cells
-
-## Contributing
-
-Not yet — the foundations are in flux. Issues and design discussion are welcome;
-please open an issue before writing code.
+- [csvlens](https://github.com/YS-L/csvlens) — large CSV viewing
+- [VisiData](https://www.visidata.org/) — tabular exploration and editing
+- [sc-im](https://github.com/andmarti1424/sc-im) — terminal spreadsheet
+- [IronCalc](https://github.com/ironcalc/IronCalc) — spreadsheet engine
+- [l123](https://github.com/duane1024/l123) — Lotus-style terminal spreadsheet
 
 ## License
 
-Licensed under either of Apache License, Version 2.0
-([LICENSE-APACHE](LICENSE-APACHE)) or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your
-option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this work by you shall be dual licensed as above, without any additional
-terms or conditions.
-
-Copyright © 2026 Wasabi OÜ
+MIT OR Apache-2.0. Copyright © 2026 Wasabi OÜ.
