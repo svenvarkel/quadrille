@@ -77,7 +77,7 @@ version is intended for targeted corrections, not millions of per-cell patches.
 | w | Choose workbook sheet with arrows, name or number; save edits first |
 | Enter / F2 | Edit the selected cell |
 | Ctrl+Z | Undo the last cell edit |
-| Ctrl+S / F4 | Save to a **new** filename |
+| Ctrl+S / F4 | Save As; the source path replaces the original, other existing files are refused |
 | + / - | Widen / narrow columns |
 | q / Ctrl+Q / Ctrl+C / F10 | Quit; confirm if there are unsaved changes |
 
@@ -232,11 +232,12 @@ as `bytes` and original workbook size separately as `source_bytes`.
 
 ## Save behavior and limits
 
-Saves always create a new file. The default is `original.edited.<extension>` beside the
-source. Existing destinations, including the source itself, are refused. Output is
-written to a temporary file in the destination directory, flushed and synced, then
-published without overwriting an existing path. Detected source changes or write
-errors prevent publication.
+Save As defaults to `original.edited.<extension>` beside the source. Choosing the
+source path atomically replaces it and reloads the session; any other existing
+destination is refused. Output is written to a temporary file in the destination
+directory, flushed and synced, then published (an atomic rename over the source, or
+a no-clobber publish for new paths). Detected source changes or write errors prevent
+publication.
 
 For CSV, when no sort is active, unedited records are copied as raw bytes. **Edited records are reserialized**:
 field values and record endings are preserved, but optional quoting within those
@@ -244,9 +245,7 @@ records may change. This is not yet byte-exact preservation of unedited fields
 inside an edited record. With no sort active, an unchanged save or a save after undoing all edits
 produces a byte-identical copy.
 
-Saving over the source atomically replaces and reloads it. Saving elsewhere keeps
-the session on the original file plus its edits; other existing destinations are
-never overwritten.
+Saving elsewhere keeps the session on the original file plus its edits.
 
 The source must remain unchanged while open. Length, modification time, and (on
 Unix) file identity are checked, but there is no filesystem snapshot or exclusive
