@@ -1,5 +1,6 @@
 //! Workbook values use the CSV engine; native saves patch only edited XML cells.
 use super::*;
+use a1::{A1Error, Address, cell_name};
 use calamine::Reader;
 use roxmltree::{Document, Node, ParsingOptions};
 use std::collections::BTreeSet;
@@ -14,7 +15,6 @@ const XML_LIMIT: u64 = 128 * 1024 * 1024;
 const PACKAGE_LIMIT: u64 = 256 * 1024 * 1024;
 const CELL_LIMIT: u64 = 5_000_000;
 const NODE_LIMIT: u32 = 8_000_000;
-type Address = (u64, usize);
 type CellRange = (Address, Address);
 
 pub(crate) struct Workbook {
@@ -189,58 +189,25 @@ pub(crate) fn sheet_names(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// A1 cell with optional `$` anchors, within 1,048,576 rows and 16,384 columns.
 fn address(text: &str) -> Result<Address> {
-    let text = text.replace('$', "");
-    let split = text
-        .find(|c: char| c.is_ascii_digit())
-        .ok_or("Invalid workbook cell address")?;
-    let (letters, digits) = text.split_at(split);
-    if letters.is_empty()
-        || !letters.bytes().all(|b| b.is_ascii_alphabetic())
-        || !digits.bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err("Invalid workbook cell address".into());
-    }
-    let mut col = 0usize;
-    for b in letters.bytes() {
-        col = col
-            .checked_mul(26)
-            .and_then(|v| v.checked_add((b.to_ascii_uppercase() - b'A' + 1) as usize))
-            .ok_or("Workbook column overflow")?;
-    }
-    let row = digits
-        .parse::<u64>()?
-        .checked_sub(1)
-        .ok_or("Workbook rows start at 1")?;
-    if row >= 1_048_576 || col > 16_384 {
+    let (row, col) = a1::parse_cell(&text.replace('$', "")).map_err(|error| match error {
+        A1Error::ColumnTooLarge => "Workbook column overflow".into(),
+        A1Error::RowTooLarge(error) => error.to_string(),
+        A1Error::RowZero => "Workbook rows start at 1".into(),
+        _ => "Invalid workbook cell address".to_owned(),
+    })?;
+    if row >= 1_048_576 || col >= 16_384 {
         return Err("Workbook cell exceeds supported sheet dimensions".into());
     }
-    Ok((row, col - 1))
+    Ok((row, col))
 }
 
 fn cell_range(text: &str) -> Result<CellRange> {
-    let (a, b) = text.split_once(':').unwrap_or((text, text));
-    let (a, b) = (address(a)?, address(b)?);
-    if a.0 > b.0 || a.1 > b.1 {
-        return Err("Invalid workbook cell range".into());
-    }
-    Ok((a, b))
-}
-
-fn a1((row, col): Address) -> String {
-    let mut n = col + 1;
-    let mut letters = Vec::new();
-    while n > 0 {
-        n -= 1;
-        letters.push(b'A' + (n % 26) as u8);
-        n /= 26;
-    }
-    letters.reverse();
-    format!(
-        "{}{next}",
-        String::from_utf8(letters).unwrap(),
-        next = row + 1
-    )
+    let (first, last) = a1::split_range(text);
+    let range = a1::Range::new(address(first)?, address(last)?)
+        .map_err(|_| "Invalid workbook cell range")?;
+    Ok((range.first, range.last))
 }
 
 fn repeat(node: Node<'_, '_>, name: &str) -> Result<u64> {
@@ -695,7 +662,7 @@ fn xlsx_cell(
     if let Some(formula) = value.strip_prefix('=') {
         let start = match node {
             Some(n) => start_tag(n, text, &[("", "t")], "")?,
-            None => format!("<{c} r=\"{}\">", a1(at)),
+            None => format!("<{c} r=\"{}\">", cell_name(at)),
         };
         return Ok(format!("{start}<{f}>{}</{f}>{tail}</{c}>", escape(formula)));
     }
@@ -716,7 +683,7 @@ fn xlsx_cell(
     }
     let start = match node {
         Some(n) => start_tag(n, text, &[("", "t")], " t=\"inlineStr\"")?,
-        None => format!("<{c} r=\"{}\" t=\"inlineStr\">", a1(at)),
+        None => format!("<{c} r=\"{}\" t=\"inlineStr\">", cell_name(at)),
     };
     // Keep non-value children such as extension metadata intact.
     Ok(format!(
@@ -745,7 +712,7 @@ fn patch_xlsx(doc: &Document<'_>, text: &str, edits: &Edits) -> Result<String> {
             if last != original {
                 changes.push((
                     reference.range(),
-                    format!("ref=\"{}:{}\"", a1(first), a1(last)),
+                    format!("ref=\"{}\"", a1::Range { first, last }),
                 ));
             }
         }
@@ -1058,4 +1025,60 @@ fn patch_ods(doc: &Document<'_>, text: &str, name: &str, edits: &Edits) -> Resul
         return Err("Some ODS target cells were not found; output was not published".into());
     }
     splice(text, changes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error<T: std::fmt::Debug>(result: Result<T>) -> String {
+        result.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn addresses_strip_anchors_and_keep_workbook_bounds_and_wording() {
+        for (text, at) in [
+            ("A1", (0, 0)),
+            ("$A$1", (0, 0)),
+            ("a$65", (64, 0)),
+            ("$$B$2$", (1, 1)),
+            ("XFD1048576", (1_048_575, 16_383)),
+        ] {
+            assert_eq!(address(text).unwrap(), at, "{text}");
+        }
+        for (text, message) in [
+            ("", "Invalid workbook cell address"),
+            ("A", "Invalid workbook cell address"),
+            ("1", "Invalid workbook cell address"),
+            ("A1x", "Invalid workbook cell address"),
+            ("Õ1", "Invalid workbook cell address"),
+            ("ZZZZZZZZZZZZZZZZZZZZZZZZ1", "Workbook column overflow"),
+            (
+                "A18446744073709551616",
+                "number too large to fit in target type",
+            ),
+            ("A0", "Workbook rows start at 1"),
+            ("$A$0", "Workbook rows start at 1"),
+            ("XFE1", "Workbook cell exceeds supported sheet dimensions"),
+            (
+                "A1048577",
+                "Workbook cell exceeds supported sheet dimensions",
+            ),
+        ] {
+            assert_eq!(error(address(text)), message, "{text}");
+        }
+    }
+
+    #[test]
+    fn cell_ranges_use_workbook_wording() {
+        assert_eq!(cell_range("A1:$D$5").unwrap(), ((0, 0), (4, 3)));
+        assert_eq!(cell_range("B2").unwrap(), ((1, 1), (1, 1)));
+        assert_eq!(error(cell_range("B2:A1")), "Invalid workbook cell range");
+        assert_eq!(error(cell_range("A1:B")), "Invalid workbook cell address");
+        assert_eq!(error(cell_range("A0:B1")), "Workbook rows start at 1");
+        assert_eq!(
+            error(cell_range("A1:XFE1")),
+            "Workbook cell exceeds supported sheet dimensions"
+        );
+    }
 }

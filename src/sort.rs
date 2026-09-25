@@ -31,24 +31,15 @@ pub fn parse_sort(text: &str) -> Result<Vec<SortKey>> {
         } else {
             (part, false)
         };
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_alphabetic()) {
-            return Err(
-                "Use column letters, commas, - for descending and :n for numbers; e.g. B,-D:n"
-                    .into(),
-            );
-        }
-        let mut column = 0usize;
-        for b in part.bytes() {
-            column = column
-                .checked_mul(26)
-                .and_then(|c| c.checked_add((b.to_ascii_uppercase() - b'A' + 1) as usize))
-                .ok_or("Column is too large")?;
-        }
-        if keys.iter().any(|k: &SortKey| k.column == column - 1) {
+        let column = a1::column_index(part).map_err(|error| match error {
+            a1::A1Error::ColumnTooLarge => "Column is too large",
+            _ => "Use column letters, commas, - for descending and :n for numbers; e.g. B,-D:n",
+        })?;
+        if keys.iter().any(|k: &SortKey| k.column == column) {
             return Err("A sort column may only appear once".into());
         }
         keys.push(SortKey {
-            column: column - 1,
+            column,
             descending,
             numeric,
         });
@@ -290,15 +281,7 @@ pub(crate) fn write_sorted(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
-
-    fn ready(sheet: &Sheet) {
-        let start = Instant::now();
-        while !sheet.progress().done {
-            assert!(start.elapsed() < Duration::from_secs(10));
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
+    use std::time::Duration;
 
     fn sorted(sheet: &mut Sheet, spec: &str, header: bool) {
         let job = sheet.start_sort(parse_sort(spec).unwrap(), header).unwrap();
@@ -415,6 +398,45 @@ mod tests {
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_keys_index_errors_and_blanks_sort_last_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.csv");
+        fs::write(&source, "b\n,\na\n,\nc\n,\nd\n").unwrap();
+        let mut sheet = Sheet::open(&source, b',').unwrap();
+        ready(&sheet);
+        assert_eq!(
+            sheet
+                .start_sort(Vec::new(), false)
+                .err()
+                .unwrap()
+                .to_string(),
+            "Choose at least one sort column"
+        );
+        for spec in ["A", "-A"] {
+            sorted(&mut sheet, spec, false);
+            let rows = sheet.window(0, 7).unwrap();
+            let values: Vec<_> = rows.iter().map(|r| &r[0]).collect();
+            let expected = if spec == "A" {
+                ["a", "b", "c", "d", "", "", ""]
+            } else {
+                ["d", "c", "b", "a", "", "", ""]
+            };
+            assert_eq!(values, expected, "{spec}");
+        }
+        fs::write(&source, b"a\n\xff\n").unwrap();
+        let invalid = Sheet::open(&source, b',').unwrap();
+        assert!(ready(&invalid).error.is_some());
+        assert!(
+            invalid
+                .start_sort(parse_sort("A").unwrap(), false)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("UTF-8")
         );
     }
 }

@@ -194,15 +194,7 @@ fn start(offsets: &[u64], row: u64) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
-
-    fn ready(sheet: &Sheet) {
-        let start = Instant::now();
-        while !sheet.progress().done {
-            assert!(start.elapsed() < Duration::from_secs(10));
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
+    use std::time::Duration;
 
     fn open(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> Sheet {
         let path = dir.path().join(name);

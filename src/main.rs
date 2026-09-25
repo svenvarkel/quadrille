@@ -13,7 +13,7 @@ use crossterm::{
     },
     execute,
 };
-use quadrille::{Progress, Result, SaveJob, Sheet, SortJob, parse_sort};
+use quadrille::{Progress, Result, SaveJob, Sheet, SortJob, cell_name, column_name, parse_sort};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Margin, Rect},
@@ -48,7 +48,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let Some(sheet) = cli::open()? else {
+    let Some(sheet) = cli::run(cli::parse(std::env::args_os().skip(1))?)? else {
         return Ok(());
     };
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -908,7 +908,7 @@ impl App {
                     }),
             );
         frame.render_widget(table, areas[1]);
-        let cell = format!("{}{}", column_name(self.col), self.row + 1);
+        let cell = cell_name((self.row, self.col));
         let mut value = self.current().map(safe).unwrap_or_default();
         if let Some(formula) = self.sheet.formula(self.row, self.col) {
             value = if self.sheet.is_edited(self.row, self.col) {
@@ -1296,19 +1296,6 @@ fn safe(text: &str) -> String {
         .collect()
 }
 
-fn column_name(mut col: usize) -> String {
-    let mut name = Vec::new();
-    loop {
-        name.push(b'A' + (col % 26) as u8);
-        if col < 26 {
-            break;
-        }
-        col = col / 26 - 1;
-    }
-    name.reverse();
-    String::from_utf8(name).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,16 +1364,33 @@ mod tests {
         }
     }
     #[test]
+    fn every_prompt_renders_at_every_size() {
+        for action in [
+            Action::Edit,
+            Action::Save,
+            Action::Goto,
+            Action::Sort,
+            Action::Sheet,
+            Action::Quit,
+        ] {
+            let mut p = Prompt::new(action, "a\r\tb\u{1}\nc".into());
+            p.choices = vec!["Data".into(), "a\r\tb\u{1}\nc".into()];
+            p.header = action != Action::Sort;
+            for (w, h) in [(1, 1), (20, 5), (100, 30)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| draw_prompt(f, &p)).unwrap();
+            }
+        }
+        assert_eq!(safe("a\r\tb\u{1}\nc"), "a␍⇥b�↵c");
+    }
+
+    #[test]
     fn help_is_modal_and_mouse_uses_the_rendered_grid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.csv");
         std::fs::write(&path, "a,b,c\n1,2,3\n4,5,6\n").unwrap();
         let mut sheet = Sheet::open(&path, b',').unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !sheet.progress().done {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        quadrille::ops::wait_for_index(&sheet, quadrille::ops::Wait::All).unwrap();
         let records = sheet.window(0, 3).unwrap();
         let p = sheet.progress();
         let mut app = App::new(sheet);

@@ -1,0 +1,58 @@
+Quadrille — CSV, XLSX and ODS cell editor for humans and agents
+
+Usage: qd [OPTIONS] FILE
+
+Without headless options, opens the terminal UI.
+
+  -d, --delimiter CHAR  Separator (default: comma; 'tab' for TSV)
+      --sheets          List workbook sheet names as JSON
+      --sheet NAME      Open a workbook sheet (default: first sheet)
+      --check           Scan the file; emit JSON counts, timing and index size
+      --read A1:C10     Read a rectangle as JSON (at most 100,000 cells / 10,000 rows)
+      --set CELL VALUE  Change one cell; repeat for multiple edits
+      --apply FILE      Apply a JSON array of {"cell":"B7","value":"text"} edits
+      --sort B,-D:n     Sort B ascending as text, D descending numerically
+      --no-header       Include the first record in sorting (default: keep it)
+      --dry-run         Preview edits/sort as JSON without writing a file
+      --find TEXT       Find cells containing TEXT (case-sensitive); emit their addresses
+      --exact           With --find: the whole value must equal TEXT; '' finds empty cells
+      --ignore-case     With --find: compare Unicode-lowercased text (not case folding)
+      --columns B,D     With --find: search only these columns
+      --from CELL       With --find: start at CELL, inclusive (default A1)
+      --limit N         With --find: stop after N matches (default 100, maximum 10,000)
+  -o, --output FILE     Save to FILE; the input itself may be replaced
+  -h, --help            Show this help
+
+Examples:
+  qd large.csv
+  qd large.csv --read A1:D20
+  qd large.csv --set B7 '00123' --dry-run
+  qd large.csv --find Tallinn --columns B --limit 20
+  qd large.csv --apply changes.json --output corrected.csv
+
+Rows are 1-based CSV records, including any header; columns are A, B, ..., AA.
+Values are strings. Missing fields in ragged records read as null.
+Edits require --dry-run or --output. --read combined with edits shows the result.
+JSON goes to stdout; errors go to stderr with a nonzero exit status.
+
+Find searches row by row the values --read would show (edits applied, cached
+formula results), without waiting for indexing. With --sort, cells are sorted-view
+coordinates. Pass "next" as --from for the next page; null means the end was
+reached. --find cannot be combined with --read, --output or --check.
+
+TUI: ? / h / F1 help, s / F6 sort, click select, double-click edit, wheel scroll.
+Arrows / PgUp / PgDn move, Home / End first / last column,
+Ctrl+Home / Ctrl+End first / last indexed row, Ctrl+G go to row,
+Enter / F2 edit, Ctrl+Z undo, Ctrl+S / F4 save as, +/- column width,
+q / Ctrl+Q quit. In an editor: Ctrl+A select all, Ctrl+J insert newline.
+
+Workbooks: --sheet selects one sheet; --sheets lists them. Values are read as
+text. In XLSX, edits beginning with = create formulas; existing formulas are
+read-only, with cached results only. Unused XLSX columns can be edited.
+Native saves preserve other sheets/styles and require source row order.
+Use a .csv destination to export the selected sheet, including a sorted view.
+
+UTF-8 CSV: without sorting, unedited records retain their bytes. Edited
+records may be requoted. Sorted exports use LF endings and skip blank lines.
+--check checks readability and UTF-8, not strict CSV syntax.
+
