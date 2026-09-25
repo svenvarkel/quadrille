@@ -14,11 +14,29 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+mod find;
 mod sort;
 mod workbook;
+pub use find::{FindQuery, FindResult};
 pub use sort::{SortJob, SortKey, SortOrder, parse_sort};
 
 const STRIDE: u64 = 64;
+/// Zero-based index of column letters, case-insensitive. Unbounded: CSV records may be
+/// wider than XLSX's XFD; workbooks enforce their own column limit on edits.
+pub fn column_index(letters: &str) -> Result<usize> {
+    if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Err(format!("Use column letters such as B, not {letters:?}").into());
+    }
+    letters
+        .bytes()
+        .try_fold(0usize, |column, b| {
+            column
+                .checked_mul(26)?
+                .checked_add((b.to_ascii_uppercase() - b'A' + 1) as usize)
+        })
+        .map(|column| column - 1)
+        .ok_or_else(|| "Column address is too large".into())
+}
 type Edits = BTreeMap<(u64, usize), String>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -628,6 +646,29 @@ mod tests {
             assert_eq!(sheet.edit_count(), 0);
             assert_eq!(saved(&sheet, &dir.path().join(format!("{case}-undo"))), bytes);
         }
+    }
+
+    #[test]
+    fn column_letters_are_strict_and_bounded() {
+        for (letters, index) in [
+            ("A", 0),
+            ("z", 25),
+            ("AA", 26),
+            ("aB", 27),
+            ("XFD", 16_383),
+            ("XFE", 16_384),
+        ] {
+            assert_eq!(column_index(letters).unwrap(), index, "{letters}");
+        }
+        for bad in ["", " A", "A ", "A1", "Õ", "ZZZZZZZZZZZZZZZZZZZZZZZZ"] {
+            assert!(column_index(bad).is_err(), "{bad:?}");
+        }
+        assert!(
+            column_index("ZZZZZZZZZZZZZZZZZZZZZZZZ")
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
     }
 
     #[test]

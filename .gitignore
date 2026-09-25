@@ -14,3 +14,6 @@
 *.swp
 test-data/*.*
 __pycache__
+
+# Claude worktrees
+.claude/worktrees/

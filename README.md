@@ -63,6 +63,41 @@ diagnostics to stderr, and failures return a nonzero exit status. `--output`
 without edits creates a byte-identical copy. Batch edits live in memory; this
 version is intended for targeted corrections, not millions of per-cell patches.
 
+### Find
+
+```sh
+# Addresses of cells containing "Tallinn" in columns B and D, two at a time.
+./target/release/qd large.csv --find Tallinn --columns B,D --limit 2
+
+# Continue from the previous result's "next" cell.
+./target/release/qd large.csv --find Tallinn --columns B,D --limit 2 --from C912
+```
+
+```json
+{"source": "/abs/large.csv",
+ "find": {"text": "Tallinn", "columns": ["B", "D"], "exact": false, "ignore_case": false, "from": "A1", "limit": 2},
+ "coordinates": "source",
+ "matches": [{"cell": "B7", "value": "Tallinn"}, {"cell": "B912", "value": "Tallinn-Nõmme"}],
+ "next": "C912", "records_scanned": 912}
+```
+
+Find matches a case-sensitive substring by default; `--exact` requires the whole
+value to equal the text (`--exact --find ''` finds empty cells) and `--ignore-case`
+compares Unicode-lowercased text (not locale-aware case folding). The search runs
+row by row, left to right, over the values `--read` returns: edits applied, workbook
+formulas as their cached results, formula text never. CSV searches the fields present
+in each record; workbooks search the imported rectangle, including its blank cells,
+plus edited cells beyond it. `--from CELL` (default `A1`) is inclusive and `--limit`
+defaults to 100 (maximum 10,000). `next` is non-null whenever the limit was hit, so
+the final page may be empty; `null` means the end was reached.
+
+Find does not wait for indexing and stops at the limit, so an early match returns
+quickly; only the scanned part is checked for invalid UTF-8. A search with no
+matches reads the whole file, roughly the cost of indexing it. With `--sort` the
+matches are sorted-view cells (`"coordinates": "sorted_view"`); with `--set`/`--apply
+--dry-run` the edited values are searched. `--find` cannot be combined with `--read`,
+`--output` or `--check`.
+
 ## Controls
 
 | Key | Action |
@@ -275,7 +310,9 @@ python3 tests/workbook_tui_smoke.py target/release/qd
 
 Tests cover multiline and quoted fields, UTF-8, BOM and line endings, sparse seeks,
 copy/edit/undo round trips, source-change detection, refusal to overwrite existing
-files, CLI patches and dry runs, sorting with stable edit identity, mouse navigation,
+files, CLI patches and dry runs, sorting with stable edit identity, find (modes,
+paging at every page size, partial indexes, edits, sorted views, workbook formulas
+and blanks, source changes mid-scan), mouse navigation,
 and terminal input/rendering. Workbook tests cover sheet selection, source coordinates,
 formula/merge protection, styles, repeated ODS rows/cells, untouched ZIP members,
 native saves, undo, CSV exports and switching sheets after saving. The original exploration is in
