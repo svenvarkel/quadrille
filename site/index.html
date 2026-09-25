@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quadrille</title>
+<meta name="description" content="Quadrille (qd) is a CSV, XLSX and ODS cell editor for agents and humans. Opens gigabyte CSVs without loading them, changes only the cells you name, and never converts your values.">
+<meta property="og:title" content="Quadrille — edit the cell, keep the file">
+<meta property="og:description" content="A CSV, XLSX and ODS cell editor for agents and humans. JSON CLI, terminal UI, and unchanged records copied byte for byte.">
+<meta property="og:url" content="https://quadrille.dev/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#00458a">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Martian+Mono:wdth,wght@87.5..112.5,300..800&family=Schibsted+Grotesk:ital,wght@0,400..700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root {
+  --paper: #f5f7f6;
+  --paper-2: #eaf0f2;
+  --rule: #cfdbe6;
+  --rule-strong: #a9c0d6;
+  --ink: #14202e;
+  --ink-soft: #4a5a6c;
+  --blue: #00458a;
+  --blue-ink: #ffffff;
+  --amber: #ffd740;
+  --amber-ink: #111827;
+  --edited: #8a6400;
+  --bad: #b3261e;
+  --term-bg: #121212;
+  --term-fg: #eeeeee;
+  --term-dim: #b2b8c4;
+  --term-edit: #ffdd57;
+  --code-bg: #0f1a27;
+  --code-fg: #dfe8f1;
+  --code-key: #86e2ff;
+  --code-str: #ffdd57;
+  --code-dim: #8fa3b8;
+  --display: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --body: "Schibsted Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --cell: 24px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0d1520; --paper-2: #121d2b; --rule: #1b2a3b; --rule-strong: #2a4058;
+    --ink: #e4ebf2; --ink-soft: #9fb0c2; --blue: #5aa9ff; --blue-ink: #06121f;
+    --edited: #ffdd57; --bad: #ff8a80; --code-bg: #08101a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0d1520; --paper-2: #121d2b; --rule: #1b2a3b; --rule-strong: #2a4058;
+  --ink: #e4ebf2; --ink-soft: #9fb0c2; --blue: #5aa9ff; --blue-ink: #06121f;
+  --edited: #ffdd57; --bad: #ff8a80; --code-bg: #08101a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--rule) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
+  background-position: -1px -1px;
+  color: var(--ink);
+  font: 400 17px/1.6 var(--body);
+  padding-inline: 16px;
+}
+a { color: var(--blue); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; border-radius: 2px; }
+.wrap { max-width: 1128px; margin-inline: auto; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.02em; }
+h2 { font-size: clamp(26px, 3.4vw, 38px); line-height: 1.15; font-weight: 700; font-stretch: 87.5%; }
+h3 { font-size: 17px; font-weight: 700; font-stretch: 100%; letter-spacing: 0; }
+p { margin: 0; }
+.lede { color: var(--ink-soft); max-width: 62ch; }
+code, kbd, pre { font-family: var(--mono); font-size: 0.88em; }
+.label {
+  font: 600 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--blue);
+}
+
+/* nav */
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 20px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font: 700 18px/1 var(--display); }
+.brand .logo { color: var(--ink); flex: none; }
+.brand .mark { width: 36px; height: 20px; font-size: 12px; display: grid; place-items: center; background: var(--amber); color: var(--amber-ink); font: 700 14px/1 var(--mono); outline: 1px solid var(--amber-ink); }
+nav.links { display: flex; gap: 20px; flex-wrap: wrap; font: 500 15px/1 var(--body); }
+nav.links a { color: var(--ink); text-decoration: none; }
+nav.links a:hover { color: var(--blue); text-decoration: underline; }
+
+/* sections */
+section { padding-block: 72px; display: grid; gap: 28px; }
+.sec-head { display: grid; gap: 14px; }
+.panel { background: var(--paper); border: 1px solid var(--rule-strong); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr); gap: 48px; align-items: center; padding-block: 40px 56px; }
+.hero h1 { font-size: clamp(40px, 6.2vw, 76px); line-height: 1.0; font-weight: 800; font-stretch: 87.5%; letter-spacing: -0.04em; }
+.hero h1 .cell { background: var(--amber); color: var(--amber-ink); padding-inline: 0.08em; box-shadow: 0 0 0 2px var(--amber-ink) inset; }
+.hero-copy { display: grid; gap: 24px; }
+.hero-copy .lede { font-size: 19px; }
+.install { display: flex; align-items: stretch; max-width: 100%; border: 1px solid var(--ink); background: var(--paper); width: fit-content; }
+.install code { padding: 12px 16px; font-size: 15px; white-space: nowrap; overflow-x: auto; }
+.install code::before { content: "$ "; color: var(--ink-soft); }
+.install button { border: 0; border-left: 1px solid var(--ink); background: var(--ink); color: var(--paper); font: 600 13px/1 var(--mono); padding-inline: 16px; cursor: pointer; }
+.install button:hover { background: var(--blue); }
+.meta-row { display: flex; flex-wrap: wrap; gap: 8px 20px; font: 500 14px/1.4 var(--mono); color: var(--ink-soft); }
+
+/* terminal mock */
+.term { background: var(--term-bg); color: var(--term-fg); font: 400 13px/1.55 var(--mono); border: 1px solid #000; box-shadow: 8px 8px 0 var(--blue); overflow: hidden; }
+.term-bar { display: flex; gap: 6px; padding: 8px 12px; background: #1d1d1d; color: var(--term-dim); font-size: 12px; align-items: center; }
+.term-bar i { width: 10px; height: 10px; border-radius: 50%; background: #3a3a3a; display: block; }
+.term-bar span { margin-left: 8px; }
+.term-scroll { overflow-x: auto; }
+.grid { border-collapse: collapse; width: 100%; min-width: 520px; font-variant-numeric: tabular-nums; }
+.grid th, .grid td { padding: 1px 10px; text-align: left; white-space: nowrap; font-weight: 400; }
+.grid thead th { color: var(--term-dim); }
+.grid tbody th { color: var(--term-dim); text-align: right; width: 1%; }
+.grid .sel { background: #ffd740; color: #111827; font-weight: 700; }
+.grid .ed { color: var(--term-edit); text-decoration: underline; text-underline-offset: 3px; }
+.term-preview { padding: 6px 12px; border-top: 1px solid #2a2a2a; color: var(--term-dim); }
+.term-preview b { color: var(--term-fg); font-weight: 400; }
+.term-status { padding: 2px 12px; color: var(--term-dim); }
+.term-keys { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 3px 12px; background: #00458a; color: #fff; }
+.term-keys b { color: #86e2ff; font-weight: 600; }
+
+/* proof strip */
+.proof { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--ink); background: var(--paper); }
+.proof div { padding: 20px; display: grid; gap: 4px; border-left: 1px solid var(--rule-strong); }
+.proof div:first-child { border-left: 0; }
+.proof strong { font: 700 clamp(24px, 3vw, 34px)/1.1 var(--display); font-stretch: 87.5%; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; }
+.proof span { color: var(--ink-soft); font-size: 14px; }
+.proof-note { font: 400 13px/1.5 var(--mono); color: var(--ink-soft); }
+
+/* mangle compare */
+.compare { display: grid; gap: 0; }
+.tabs { display: flex; gap: 0; }
+.tabs button { font: 600 14px/1 var(--mono); padding: 12px 18px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); cursor: pointer; margin-right: -1px; }
+.tabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); }
+.sheet-wrap { overflow-x: auto; border: 1px solid var(--ink); background: var(--paper); }
+.sheet { border-collapse: collapse; width: 100%; min-width: 640px; font: 400 15px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+.sheet th, .sheet td { border: 1px solid var(--rule-strong); padding: 8px 12px; text-align: left; white-space: nowrap; }
+.sheet thead th { background: var(--paper-2); font-weight: 600; font-size: 12px; color: var(--ink-soft); }
+.sheet thead tr:first-child th { font-size: 11px; letter-spacing: 0.06em; }
+.sheet tbody th { background: var(--paper-2); color: var(--ink-soft); font-weight: 400; font-size: 12px; width: 1%; }
+.sheet td.bad { color: var(--bad); text-decoration: line-through; text-decoration-thickness: 1px; }
+.sheet td.bad::after { content: attr(data-to); text-decoration: none; display: inline-block; margin-left: 10px; color: var(--bad); font-weight: 600; }
+.sheet td.keep { background: var(--amber); color: var(--amber-ink); font-weight: 700; }
+.compare-note { font-size: 15px; color: var(--ink-soft); padding-top: 12px; max-width: 72ch; }
+
+/* two column feature blocks */
+.split { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px; align-items: start; }
+.points { display: grid; gap: 18px; margin: 0; padding: 0; list-style: none; }
+.points li { display: grid; gap: 4px; padding-left: 20px; position: relative; }
+.points li::before { content: ""; position: absolute; left: 0; top: 0.55em; width: 10px; height: 10px; background: var(--amber); outline: 1px solid var(--amber-ink); }
+.points p { color: var(--ink-soft); font-size: 16px; }
+
+pre.code { margin: 0; background: var(--code-bg); color: var(--code-fg); padding: 18px 20px; overflow-x: auto; font-size: 13.5px; line-height: 1.65; border: 1px solid #000; }
+pre.code .c { color: var(--code-dim); }
+pre.code .p { color: var(--code-dim); user-select: none; }
+pre.code .k { color: var(--code-key); }
+pre.code .s { color: var(--code-str); }
+.stack { display: grid; gap: 16px; min-width: 0; }
+.tag { display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 5px 8px; border: 1px dashed var(--blue); color: var(--blue); vertical-align: middle; }
+
+/* keys */
+.keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0; border: 1px solid var(--ink); background: var(--paper); }
+.keys div { padding: 14px 16px; border-right: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); display: flex; gap: 12px; align-items: baseline; }
+kbd { display: inline-block; min-width: 2.2em; text-align: center; padding: 2px 6px; border: 1px solid var(--ink); border-bottom-width: 3px; background: var(--paper-2); color: var(--ink); font-size: 13px; font-weight: 600; }
+.keys span { font-size: 15px; color: var(--ink-soft); }
+
+/* limits */
+.limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0; border: 1px solid var(--ink); background: var(--paper); }
+.limits div { padding: 18px 20px; border-right: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); display: grid; gap: 6px; }
+.limits h3 { font-size: 15px; }
+.limits p { font-size: 15px; color: var(--ink-soft); }
+
+/* teams cta */
+.cta { background: var(--blue); color: var(--blue-ink); padding: 40px; display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 32px; align-items: center; box-shadow: 8px 8px 0 var(--amber); }
+.cta h2 { color: var(--blue-ink); }
+.cta p { color: var(--blue-ink); opacity: 0.92; }
+.cta .label { color: var(--blue-ink); opacity: 0.8; }
+.cta ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.mail { display: flex; border: 1px solid var(--blue-ink); width: fit-content; max-width: 100%; }
+.mail code { padding: 12px 16px; font-size: 15px; user-select: all; overflow-x: auto; }
+.mail-link { color: inherit; text-decoration: none; display: flex; min-width: 0; }
+.mail-link:hover code { text-decoration: underline; }
+.mail button { border: 0; border-left: 1px solid var(--blue-ink); background: var(--blue-ink); color: var(--blue); font: 600 13px/1 var(--mono); padding-inline: 16px; cursor: pointer; }
+
+footer { padding-block: 48px 64px; display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; color: var(--ink-soft); font-size: 14px; border-top: 1px solid var(--ink); }
+footer nav { display: flex; gap: 20px; flex-wrap: wrap; }
+
+@media (max-width: 880px) {
+  .hero, .split, .cta { grid-template-columns: minmax(0, 1fr); }
+  .proof { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proof div:nth-child(3) { border-left: 0; }
+  .proof div:nth-child(n+3) { border-top: 1px solid var(--rule-strong); }
+  section { padding-block: 48px; }
+  .cta { padding: 28px 20px; }
+}
+@media (max-width: 520px) {
+  nav.links a:not(.gh) { display: none; }
+  .hero-copy .lede { font-size: 17px; }
+  .term { box-shadow: 5px 5px 0 var(--blue); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .grid .sel { animation: blink 1.2s steps(1) 0.6s 2; }
+  @keyframes blink { 50% { background: transparent; color: var(--term-edit); } }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <a class="brand" href="#top" aria-label="Quadrille home"><svg class="logo" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect x="1" y="1" width="30" height="30" fill="var(--paper)" stroke="currentColor" stroke-width="2"/><rect x="16" y="16" width="15" height="15" fill="#ffd740"/><path d="M16 1v30M1 16h30" stroke="currentColor" stroke-width="2"/><rect x="1" y="1" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2"/></svg> Quadrille <span class="mark">qd</span></a>
+  <nav class="links" aria-label="Sections">
+    <a href="#agents">Agents</a>
+    <a href="#terminal">Terminal UI</a>
+    <a href="#workbooks">Workbooks</a>
+    <a href="#limits">Limits</a>
+    <a class="gh" href="https://github.com/svenvarkel/quadrille">GitHub</a>
+  </nav>
+</header>
+
+<main id="top">
+
+<div class="hero">
+  <div class="hero-copy">
+    <p class="label">CSV · XLSX · ODS · one binary</p>
+    <h1>Edit the <span class="cell">cell</span>. Keep the file.</h1>
+    <p class="lede">Quadrille is a cell editor for tabular files, used by agents through a JSON command line and by people through a terminal UI. It opens gigabyte CSVs without loading them, changes exactly the cells you name, and copies every unedited record byte for byte.</p>
+    <div class="install">
+      <code id="install-cmd">cargo install quadrille</code>
+      <button type="button" id="copy-install" data-copy="install-cmd" aria-label="Copy install command">Copy</button>
+    </div>
+    <div class="meta-row"><span>Rust · macOS · Linux</span><span>MIT or Apache-2.0</span><span>binary: <b>qd</b></span></div>
+  </div>
+
+  <figure class="term" style="margin:0" aria-label="The qd terminal UI with an edited cell">
+    <div class="term-bar"><i></i><i></i><i></i><span>qd shipments.csv</span></div>
+    <div class="term-scroll">
+      <table class="grid">
+        <thead><tr><th></th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr></thead>
+        <tbody>
+          <tr><th>1</th><td>order_id</td><td>zip</td><td>sku</td><td>lot</td><td>qty</td></tr>
+          <tr><th>2</th><td>000417</td><td>02134</td><td>SEPT2</td><td>1-3</td><td>12</td></tr>
+          <tr><th>3</th><td>000418</td><td>07030</td><td>MARCH1</td><td>4-11</td><td>3</td></tr>
+          <tr><th>4</th><td>000419</td><td>10001</td><td>OCT4</td><td>2-7</td><td>40</td></tr>
+          <tr><th>5</th><td>000420</td><td>60614</td><td>DEC1</td><td>9-2</td><td>1</td></tr>
+          <tr><th>6</th><td>000421</td><td class="ed">01002</td><td>SEPT2</td><td>1-3</td><td>8</td></tr>
+          <tr><th>7</th><td>000422</td><td class="sel">00123</td><td>JUN5</td><td>5-5</td><td>16</td></tr>
+          <tr><th>8</th><td>000423</td><td>94107</td><td>MARCH1</td><td>3-12</td><td>2</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="term-preview">B7 <b>00123</b></div>
+    <div class="term-status">1,806,529 records · indexed · 2 edits</div>
+    <div class="term-keys"><span><b>1</b> Help</span><span><b>2</b> Edit</span><span><b>4</b> Save</span><span><b>6</b> Sort</span><span><b>10</b> Quit</span></div>
+  </figure>
+</div>
+
+<div class="stack">
+  <div class="proof" role="list">
+    <div role="listitem"><strong>1.29 GB</strong><span>CSV file</span></div>
+    <div role="listitem"><strong>1,806,529</strong><span>records, quoted multiline fields included</span></div>
+    <div role="listitem"><strong>1.76 s</strong><span>full scan; first rows show before it ends</span></div>
+    <div role="listitem"><strong>221 KB</strong><span>sparse index kept in memory</span></div>
+  </div>
+  <p class="proof-note">Measured with <code>qd --check</code> on an Apple M1 Max. The index stores the byte offset of every 64th record, so memory tracks what you see and edit, not file size.</p>
+</div>
+
+<section id="why">
+  <div class="sec-head">
+    <p class="label">The problem</p>
+    <h2>Your spreadsheet app is editing your data</h2>
+    <p class="lede">Open a CSV in a spreadsheet app, fix one cell, save. The app converts every value it thinks it recognizes. Leading zeros vanish, product codes become dates and long IDs lose digits. Quadrille treats every value as text and writes back only what changed.</p>
+  </div>
+  <div class="compare">
+    <div class="tabs" role="tablist" aria-label="Compare save results">
+      <button type="button" role="tab" id="tab-app" aria-selected="true" aria-controls="sheet">Typical spreadsheet round trip</button>
+      <button type="button" role="tab" id="tab-qd" aria-selected="false" aria-controls="sheet">qd round trip</button>
+    </div>
+    <div class="sheet-wrap" id="sheet" role="tabpanel" aria-labelledby="tab-app">
+      <table class="sheet">
+        <thead>
+          <tr><th></th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr>
+          <tr><th>1</th><th>order_id</th><th>zip</th><th>sku</th><th>lot</th><th>tracking</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>2</th><td data-to="417">000417</td><td data-to="2134">02134</td><td data-to="2-Sep">SEPT2</td><td data-to="3-Jan">1-3</td><td data-to="9400111202555840000">9400111202555842761</td></tr>
+          <tr><th>3</th><td data-to="418">000418</td><td data-to="7030">07030</td><td data-to="1-Mar">MARCH1</td><td data-to="11-Apr">4-11</td><td data-to="9400111202555840000">9400111202555843105</td></tr>
+          <tr><th>7</th><td data-to="422">000422</td><td class="keep" title="The one intended edit">00123</td><td data-to="5-Jun">JUN5</td><td data-to="5-May">5-5</td><td data-to="1.00E+05">1E5</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note" id="compare-note">One intended edit (B7). Everything struck through was changed by the app as a side effect. Exact conversions depend on the app and locale, and each one is silent.</p>
+  </div>
+</section>
+
+<section id="agents">
+  <div class="split">
+    <div class="sec-head">
+      <p class="label">For agents</p>
+      <h2>A contract, not a screen scrape</h2>
+      <p class="lede">Agents call <code>qd</code> like any other CLI and get structured answers back. Every edit reports the value before and after, and nothing is written until you say where.</p>
+      <ul class="points">
+        <li><h3>Strings in, strings out</h3><p>Every field comes back as a JSON string. Missing fields in ragged rows are <code>null</code>. Reads outside the file fail instead of truncating.</p></li>
+        <li><h3>Dry run first</h3><p><code>--dry-run</code> returns the exact cell diff without touching disk. Edits without <code>--dry-run</code> or <code>--output</code> are refused.</p></li>
+        <li><h3>Safe publishing</h3><p>Output is written to a temp file, synced, then renamed into place. Other existing files are refused, and a changed source blocks the save.</p></li>
+        <li><h3>MCP server <span class="tag">in development</span></h3><p>The same engine as MCP tools, in the same binary, so an agent can edit while a person watches the grid.</p></li>
+      </ul>
+    </div>
+    <div class="stack">
+<pre class="code"><span class="p">$ </span>qd shipments.csv --read A7:B8
+{<span class="k">"range"</span>: <span class="s">"A7:B8"</span>,
+ <span class="k">"rows"</span>: [[<span class="s">"000422"</span>, <span class="s">"94107"</span>],
+          [<span class="s">"000423"</span>, <span class="s">"94107"</span>]]}</pre>
+<pre class="code"><span class="p">$ </span>qd shipments.csv --set B7 <span class="s">'00123'</span> --dry-run
+{<span class="k">"dry_run"</span>: true,
+ <span class="k">"changes"</span>: [{<span class="k">"cell"</span>: <span class="s">"B7"</span>,
+              <span class="k">"before"</span>: <span class="s">"94107"</span>,
+              <span class="k">"after"</span>: <span class="s">"00123"</span>}]}</pre>
+<pre class="code"><span class="c"># changes.json: [{"cell":"B7","value":"00123"}, ...]</span>
+<span class="p">$ </span>qd shipments.csv --apply changes.json --output fixed.csv
+<span class="p">$ </span>qd shipments.csv --sort <span class="s">'B,-E:n'</span> --read A1:E20</pre>
+    </div>
+  </div>
+</section>
+
+<section id="terminal">
+  <div class="sec-head">
+    <p class="label">For people</p>
+    <h2>A grid you drive with function keys</h2>
+    <p class="lede">When the agent is done, open the file and check its work. The terminal UI shows edited cells in yellow with an underline, so state never depends on color alone. Every text pair in the palette has at least 7:1 contrast. Mouse selection, scrolling and a clickable key bar work in any terminal that reports the mouse.</p>
+  </div>
+  <div class="keys">
+    <div><kbd>F2</kbd><span>Edit the selected cell</span></div>
+    <div><kbd>Ctrl Z</kbd><span>Undo the last edit</span></div>
+    <div><kbd>F6</kbd><span>Sort: <code>B,-D:n</code></span></div>
+    <div><kbd>Ctrl G</kbd><span>Jump to a record</span></div>
+    <div><kbd>F4</kbd><span>Save As, atomically</span></div>
+    <div><kbd>w</kbd><span>Switch workbook sheet</span></div>
+    <div><kbd>+</kbd> <kbd>−</kbd><span>Widen or narrow columns</span></div>
+    <div><kbd>F1</kbd><span>Help, with Mac key equivalents</span></div>
+  </div>
+</section>
+
+<section id="workbooks">
+  <div class="split">
+    <div class="sec-head">
+      <p class="label">XLSX and ODS</p>
+      <h2>Patch the workbook. Leave the rest of it alone.</h2>
+      <p class="lede">Native saves rewrite only the edited cells inside the original ZIP and XML package. Other sheets, styles, number formats, formulas and unrelated package members stay as they were. Save without changes, or undo everything, and you get a byte-identical copy.</p>
+    </div>
+    <ul class="points">
+      <li><h3>Real cell addresses</h3><p>Coordinates match the workbook, leading empty rows and columns included.</p></li>
+      <li><h3>New formulas</h3><p>Type <code>=SUM(B2:N2)</code> into an XLSX cell. Excel or LibreOffice calculates it when the file opens.</p></li>
+      <li><h3>Protected where it matters</h3><p>Existing formula, merged and array cells are read-only. Signed workbooks refuse edited saves.</p></li>
+      <li><h3>CSV export</h3><p>Sort any sheet and export the view to CSV from the CLI or the TUI.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="sec-head">
+    <p class="label">Before you trust it</p>
+    <h2>What qd does not do yet</h2>
+    <p class="lede">A data tool earns trust by being clear about its edges. These are the current ones.</p>
+  </div>
+  <div class="limits">
+    <div><h3>No formula calculation</h3><p>Formula cells show cached results. Values can be stale after edits to their inputs.</p></div>
+    <div><h3>No row insert or delete</h3><p>Quadrille edits existing cells. Structural changes are out of scope for now.</p></div>
+    <div><h3>UTF-8 only</h3><p>Other encodings produce an error instead of silent transcoding. The delimiter is set with <code>-d</code>.</p></div>
+    <div><h3>512 MiB sort budget</h3><p>Sorting keeps keys in memory. Disk-backed sorting is not implemented.</p></div>
+    <div><h3>Workbook import limits</h3><p>5 million cells per sheet and 256 MiB uncompressed. CSV has no such limits.</p></div>
+    <div><h3>Edited CSV records are requoted</h3><p>Unedited records are copied byte for byte. Optional quoting inside an edited record may change.</p></div>
+  </div>
+</section>
+
+<section id="teams">
+  <div class="cta">
+    <div class="sec-head">
+      <p class="label">Quadrille for teams</p>
+      <h2>Agents editing data you have to answer for?</h2>
+      <p>We are building a review layer on top of qd changesets: cell-level diffs in pull requests, approval before an agent's edit reaches disk, and an audit trail of who changed what and why.</p>
+    </div>
+    <div class="stack">
+      <p>Tell us about your pipeline and get early access.</p>
+      <div class="mail">
+        <a class="mail-link" href="mailto:hello@quadrille.dev?subject=Quadrille%20for%20teams"><code id="mail-addr">hello@quadrille.dev</code></a>
+        <button type="button" id="copy-mail" data-copy="mail-addr" aria-label="Copy email address">Copy</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <span>© 2026 Wasabi OÜ · MIT or Apache-2.0</span>
+  <nav aria-label="Footer">
+    <a href="https://github.com/svenvarkel/quadrille">Source</a>
+    <a href="https://github.com/svenvarkel/quadrille#readme">README</a>
+    <a href="https://crates.io/crates/quadrille">crates.io</a>
+  </nav>
+</footer>
+
+</div>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var el = document.getElementById(btn.dataset.copy);
+    var text = el.textContent;
+    var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600); };
+    var select = function () { var r = document.createRange(); r.selectNodeContents(el); var s = getSelection(); s.removeAllRanges(); s.addRange(r); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, select); else select();
+  });
+});
+
+(function () {
+  var app = document.getElementById("tab-app"), qd = document.getElementById("tab-qd");
+  var panel = document.getElementById("sheet"), note = document.getElementById("compare-note");
+  var cells = panel.querySelectorAll("td[data-to]");
+  var notes = {
+    app: note.textContent,
+    qd: "One intended edit (B7). Every other value is written back exactly as it was read, because qd never interprets field contents."
+  };
+  function show(which) {
+    var isApp = which === "app";
+    app.setAttribute("aria-selected", String(isApp));
+    app.tabIndex = isApp ? 0 : -1;
+    qd.tabIndex = isApp ? -1 : 0;
+    qd.setAttribute("aria-selected", String(!isApp));
+    panel.setAttribute("aria-labelledby", isApp ? "tab-app" : "tab-qd");
+    cells.forEach(function (td) { td.classList.toggle("bad", isApp); });
+    note.textContent = notes[which];
+  }
+  app.addEventListener("click", function () { show("app"); });
+  qd.addEventListener("click", function () { show("qd"); });
+  panel.parentElement.querySelector(".tabs").addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") { var next = app.getAttribute("aria-selected") === "true" ? qd : app; next.focus(); next.click(); }
+  });
+  show("app");
+})();
+</script>
+</body>
+</html>
