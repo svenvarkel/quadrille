@@ -94,6 +94,8 @@ def main():
             assert qd(source, '--check')['records'] == 5
             assert qd(source, '--sheet', 'Notes õ', '--read', 'A1:B3')['rows'] == [['', ''], ['', ''], ['', 'Untouched õ']]
             assert qd(source, '--read', 'A2:B2')['rows'] == [['00123', '10']]
+            found = qd(source, '--find', 'tallinn õ', '--ignore-case', '--limit', '1')
+            assert found['matches'] == [{'cell': 'C2', 'value': 'Tallinn õ'}] and found['next'] == 'D2', found
             assert 'No sheet' in qd(source, '--sheet', 'missing', '--read', 'A1', ok=False)
             clone = root / f'copy.{ext}'
             qd(source, '--output', clone)

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use quadrille::{Result, Sheet, parse_sort};
+use quadrille::{FindQuery, Result, Sheet, column_index, parse_sort};
 use serde_json::{Value, json};
 
 const HELP: &str = r#"Quadrille — CSV, XLSX and ODS cell editor for humans and agents
@@ -27,6 +27,12 @@ Without headless options, opens the terminal UI.
       --sort B,-D:n     Sort B ascending as text, D descending numerically
       --no-header       Include the first record in sorting (default: keep it)
       --dry-run         Preview edits/sort as JSON without writing a file
+      --find TEXT       Find cells containing TEXT (case-sensitive); emit their addresses
+      --exact           With --find: the whole value must equal TEXT; '' finds empty cells
+      --ignore-case     With --find: compare Unicode-lowercased text (not case folding)
+      --columns B,D     With --find: search only these columns
+      --from CELL       With --find: start at CELL, inclusive (default A1)
+      --limit N         With --find: stop after N matches (default 100, maximum 10,000)
   -o, --output FILE     Save to FILE; the input itself may be replaced
   -h, --help            Show this help
 
@@ -34,12 +40,18 @@ Examples:
   qd large.csv
   qd large.csv --read A1:D20
   qd large.csv --set B7 '00123' --dry-run
+  qd large.csv --find Tallinn --columns B --limit 20
   qd large.csv --apply changes.json --output corrected.csv
 
 Rows are 1-based CSV records, including any header; columns are A, B, ..., AA.
 Values are strings. Missing fields in ragged records read as null.
 Edits require --dry-run or --output. --read combined with edits shows the result.
 JSON goes to stdout; errors go to stderr with a nonzero exit status.
+
+Find searches row by row the values --read would show (edits applied, cached
+formula results), without waiting for indexing. With --sort, cells are sorted-view
+coordinates. Pass "next" as --from for the next page; null means the end was
+reached. --find cannot be combined with --read, --output or --check.
 
 TUI: ? / h / F1 help, s / F6 sort, click select, double-click edit, wheel scroll.
 Arrows / PgUp / PgDn move, Home / End first / last column,
@@ -77,18 +89,26 @@ fn address(text: &str) -> Result<Address> {
     {
         return Err("Use a cell address such as B7".into());
     }
-    let mut column = 0usize;
-    for letter in letters.bytes() {
-        column = column
-            .checked_mul(26)
-            .and_then(|c| c.checked_add((letter.to_ascii_uppercase() - b'A' + 1) as usize))
-            .ok_or("Column address is too large")?;
-    }
+    let column = column_index(letters)?;
     let row = digits
         .parse::<u64>()?
         .checked_sub(1)
         .ok_or("Rows start at 1")?;
-    Ok((row, column - 1))
+    Ok((row, column))
+}
+
+fn cell((row, col): Address) -> String {
+    format!("{}{}", super::column_name(col), row + 1)
+}
+
+fn columns(text: &str) -> Result<Vec<usize>> {
+    let mut columns = text
+        .split(',')
+        .map(column_index)
+        .collect::<Result<Vec<_>>>()?;
+    columns.sort_unstable();
+    columns.dedup();
+    Ok(columns)
 }
 
 fn range(text: &str) -> Result<Range> {
@@ -136,6 +156,12 @@ pub fn open() -> Result<Option<Sheet>> {
     let mut sort = None;
     let mut header = true;
     let mut positional = false;
+    let mut find = None;
+    let mut exact = false;
+    let mut ignore_case = false;
+    let mut find_columns = None;
+    let mut from = None;
+    let mut limit = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--") if !positional => positional = true,
@@ -151,6 +177,24 @@ pub fn open() -> Result<Option<Sheet>> {
             Some("--sort") if !positional => sort = Some(next_text(&mut args, "--sort")?),
             Some("--no-header") if !positional => header = false,
             Some("--dry-run") if !positional => dry_run = true,
+            Some("--find") if !positional => find = Some(next_text(&mut args, "--find")?),
+            Some("--exact") if !positional => exact = true,
+            Some("--ignore-case") if !positional => ignore_case = true,
+            Some("--columns") if !positional => {
+                find_columns = Some(columns(&next_text(&mut args, "--columns")?)?)
+            }
+            Some("--from") if !positional => {
+                from = Some(address(&next_text(&mut args, "--from")?)?)
+            }
+            Some("--limit") if !positional => {
+                let text = next_text(&mut args, "--limit")?;
+                limit = Some(
+                    text.parse::<usize>()
+                        .ok()
+                        .filter(|n| (1..=10_000).contains(n))
+                        .ok_or("--limit must be a whole number from 1 to 10,000")?,
+                );
+            }
             Some("--read") if !positional => read = Some(range(&next_text(&mut args, "--read")?)?),
             Some("--set") if !positional => {
                 edits_requested = true;
@@ -205,8 +249,20 @@ pub fn open() -> Result<Option<Sheet>> {
             }
         }
     }
+    if find.is_none()
+        && (exact || ignore_case || find_columns.is_some() || from.is_some() || limit.is_some())
+    {
+        return Err("--exact, --ignore-case, --columns, --from and --limit require --find".into());
+    }
+    if find.as_deref() == Some("") && !exact {
+        return Err("--find needs text; use --exact --find '' to find empty cells".into());
+    }
+    if find.is_some() && (read.is_some() || output.is_some() || check) {
+        return Err("--find cannot be combined with --read, --output or --check".into());
+    }
     if list_sheets {
         if check
+            || find.is_some()
             || read.is_some()
             || edits_requested
             || dry_run
@@ -228,9 +284,10 @@ pub fn open() -> Result<Option<Sheet>> {
     if !header && sort.is_none() {
         return Err("--no-header requires --sort".into());
     }
-    if sort.is_some() && read.is_none() && !dry_run && output.is_none() {
+    if sort.is_some() && read.is_none() && find.is_none() && !dry_run && output.is_none() {
         return Err(
-            "Use --sort with --read, --dry-run or --output; use F6 to sort in the TUI".into(),
+            "Use --sort with --read, --find, --dry-run or --output; use F6 to sort in the TUI"
+                .into(),
         );
     }
     if let Some(spec) = &sort {
@@ -249,13 +306,19 @@ pub fn open() -> Result<Option<Sheet>> {
         delimiter,
         selected_sheet.as_deref(),
     )?;
-    let headless = check || read.is_some() || !edits.is_empty() || dry_run || output.is_some();
+    let headless = check
+        || read.is_some()
+        || find.is_some()
+        || !edits.is_empty()
+        || dry_run
+        || output.is_some();
     if !headless {
         return Ok(Some(sheet));
     }
     // Reads can finish as soon as the requested rows are indexed; edits/saves
     // wait for the complete scan so an encoding error cannot publish a partial result.
-    loop {
+    // Find validates what it scans itself; with edits or a sort it waits like them.
+    while find.is_none() || !edits.is_empty() || sort.is_some() {
         let p = sheet.progress();
         if let Some(error) = p.error {
             return Err(error.into());
@@ -313,6 +376,47 @@ pub fn open() -> Result<Option<Sheet>> {
         let order = job.result.recv()??;
         sheet.apply_sort(order)?;
         result["sort"] = json!({"columns": spec, "header": header, "changes_coordinates": "source", "read_coordinates": "sorted_view"});
+    }
+    if let Some(text) = find {
+        let query = FindQuery {
+            text,
+            columns: find_columns,
+            exact,
+            ignore_case,
+        };
+        let (from, limit) = (from.unwrap_or((0, 0)), limit.unwrap_or(100));
+        let found = sheet.find(&query, from, limit)?;
+        let matches: Vec<Value> = found
+            .matches
+            .iter()
+            .map(|&(address, ref value)| json!({"cell": cell(address), "value": value}))
+            .collect();
+        let next = found.next.map(cell);
+        let columns = query.columns.map(|columns| {
+            columns
+                .into_iter()
+                .map(super::column_name)
+                .collect::<Vec<_>>()
+        });
+        let mut found = json!({
+            "source": result["source"],
+            "find": {"text": query.text, "columns": columns, "exact": exact, "ignore_case": ignore_case, "from": cell(from), "limit": limit},
+            "coordinates": if sort.is_some() { "sorted_view" } else { "source" },
+            "matches": matches,
+            "next": next,
+            "records_scanned": found.records_scanned,
+        });
+        for key in ["sheet", "format", "sort"] {
+            if let Some(value) = result.get(key) {
+                found[key] = value.clone();
+            }
+        }
+        if dry_run {
+            found["changes"] = result["changes"].take();
+            found["dry_run"] = json!(true);
+        }
+        emit(&found)?;
+        return Ok(None);
     }
     if let Some(range) = read {
         let records = sheet.window(range.first.0, (range.last.0 - range.first.0 + 1) as usize)?;
