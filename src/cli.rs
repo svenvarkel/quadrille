@@ -1,15 +1,18 @@
 use std::{
-    collections::BTreeMap,
     ffi::OsString,
     fs::File,
     io::{self, Write},
     path::PathBuf,
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use quadrille::{FindQuery, Result, Sheet, column_index, parse_sort};
-use serde_json::{Value, json};
+use quadrille::{
+    FindQuery, Result, Sheet,
+    a1::{self, Address, Range},
+    ops::{self, Edit, Wait},
+    parse_sort,
+};
+use serde_json::Value;
 
 const HELP: &str = r#"Quadrille — CSV, XLSX and ODS cell editor for humans and agents
 
@@ -70,63 +73,67 @@ records may be requoted. Sorted exports use LF endings and skip blank lines.
 --check checks readability and UTF-8, not strict CSV syntax.
 "#;
 
-type Address = (u64, usize);
-
-#[derive(Clone, Copy)]
-struct Range {
-    first: Address,
-    last: Address,
+#[derive(Debug, PartialEq)]
+pub enum Command {
+    Help,
+    /// List the sheets of this workbook.
+    Sheets(PathBuf),
+    /// Open a file: the TUI, unless `Open::headless`.
+    Open(Box<Open>),
 }
 
-fn address(text: &str) -> Result<Address> {
-    let split = text
-        .find(|c: char| c.is_ascii_digit())
-        .ok_or("Use a cell address such as B7")?;
-    let (letters, digits) = text.split_at(split);
-    if letters.is_empty()
-        || !letters.bytes().all(|b| b.is_ascii_alphabetic())
-        || !digits.bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err("Use a cell address such as B7".into());
+#[derive(Debug, PartialEq)]
+pub struct Open {
+    pub path: PathBuf,
+    pub delimiter: u8,
+    pub sheet: Option<String>,
+    pub check: bool,
+    pub read: Option<Range>,
+    pub edits: Vec<Edit>,
+    /// Specification and whether the first record is a header that stays first.
+    pub sort: Option<(String, bool)>,
+    pub find: Option<Find>,
+    pub dry_run: bool,
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Find {
+    pub query: FindQuery,
+    pub from: Option<Address>,
+    pub limit: Option<usize>,
+}
+
+impl Open {
+    fn headless(&self) -> bool {
+        self.check
+            || self.read.is_some()
+            || self.find.is_some()
+            || !self.edits.is_empty()
+            || self.dry_run
+            || self.output.is_some()
     }
-    let column = column_index(letters)?;
-    let row = digits
-        .parse::<u64>()?
-        .checked_sub(1)
-        .ok_or("Rows start at 1")?;
-    Ok((row, column))
-}
 
-fn cell((row, col): Address) -> String {
-    format!("{}{}", super::column_name(col), row + 1)
-}
-
-fn columns(text: &str) -> Result<Vec<usize>> {
-    let mut columns = text
-        .split(',')
-        .map(column_index)
-        .collect::<Result<Vec<_>>>()?;
-    columns.sort_unstable();
-    columns.dedup();
-    Ok(columns)
-}
-
-fn range(text: &str) -> Result<Range> {
-    let (start, end) = text.split_once(':').unwrap_or((text, text));
-    let (first, last) = (address(start)?, address(end)?);
-    if first.0 > last.0 || first.1 > last.1 {
-        return Err("Range must run from top-left to bottom-right".into());
+    /// Reads can finish as soon as the requested rows are indexed; edits/saves
+    /// wait for the complete scan so an encoding error cannot publish a partial result.
+    /// Find validates what it scans itself; with edits or a sort it waits like them.
+    fn wait(&self) -> Option<Wait> {
+        if self.find.is_some() && self.edits.is_empty() && self.sort.is_none() {
+            return None;
+        }
+        Some(match self.read {
+            Some(range)
+                if self.edits.is_empty()
+                    && self.output.is_none()
+                    && !self.check
+                    && !self.dry_run
+                    && self.sort.is_none() =>
+            {
+                Wait::Rows(range.last.0 + 1)
+            }
+            _ => Wait::All,
+        })
     }
-    let rows = last.0 - first.0 + 1;
-    let columns = last.1 - first.1 + 1;
-    if rows > 10_000
-        || (rows as usize)
-            .checked_mul(columns)
-            .is_none_or(|n| n > 100_000)
-    {
-        return Err("Read at most 100,000 cells and 10,000 rows at a time; request large datasets in chunks".into());
-    }
-    Ok(Range { first, last })
 }
 
 fn next_text(args: &mut impl Iterator<Item = OsString>, option: &str) -> Result<String> {
@@ -136,12 +143,12 @@ fn next_text(args: &mut impl Iterator<Item = OsString>, option: &str) -> Result<
         .map_err(|_| format!("{option} requires UTF-8 text").into())
 }
 
-/// Execute a headless command, or return the same engine for the TUI.
-pub fn open() -> Result<Option<Sheet>> {
-    let mut args = std::env::args_os().skip(1).peekable();
+/// Parse and validate arguments (without the program name). Errors come in argument
+/// order, then the combination rules in a fixed order. Only `--apply` reads a file.
+pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command> {
+    let mut args = args.into_iter().peekable();
     if args.peek().is_none() {
-        println!("{HELP}\n{}", super::PLATFORM_HELP);
-        return Ok(None);
+        return Ok(Command::Help);
     }
     let mut path = None;
     let mut delimiter = b',';
@@ -165,10 +172,7 @@ pub fn open() -> Result<Option<Sheet>> {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--") if !positional => positional = true,
-            Some("-h" | "--help") if !positional => {
-                println!("{HELP}\n{}", super::PLATFORM_HELP);
-                return Ok(None);
-            }
+            Some("-h" | "--help") if !positional => return Ok(Command::Help),
             Some("--check") if !positional => check = true,
             Some("--sheets") if !positional => list_sheets = true,
             Some("--sheet") if !positional => {
@@ -181,50 +185,33 @@ pub fn open() -> Result<Option<Sheet>> {
             Some("--exact") if !positional => exact = true,
             Some("--ignore-case") if !positional => ignore_case = true,
             Some("--columns") if !positional => {
-                find_columns = Some(columns(&next_text(&mut args, "--columns")?)?)
+                find_columns = Some(a1::parse_columns(&next_text(&mut args, "--columns")?)?)
             }
             Some("--from") if !positional => {
-                from = Some(address(&next_text(&mut args, "--from")?)?)
+                from = Some(a1::parse_cell(&next_text(&mut args, "--from")?)?)
             }
             Some("--limit") if !positional => {
                 let text = next_text(&mut args, "--limit")?;
                 limit = Some(
                     text.parse::<usize>()
                         .ok()
-                        .filter(|n| (1..=10_000).contains(n))
-                        .ok_or("--limit must be a whole number from 1 to 10,000")?,
+                        .and_then(|n| ops::find_limit(Some(n)).ok())
+                        .ok_or_else(|| format!("--{}", ops::FIND_LIMIT_ERROR))?,
                 );
             }
-            Some("--read") if !positional => read = Some(range(&next_text(&mut args, "--read")?)?),
+            Some("--read") if !positional => {
+                read = Some(ops::read_range(&next_text(&mut args, "--read")?)?)
+            }
             Some("--set") if !positional => {
                 edits_requested = true;
-                let cell = address(&next_text(&mut args, "--set CELL")?)?;
+                let cell = a1::parse_cell(&next_text(&mut args, "--set CELL")?)?;
                 edits.push((cell, next_text(&mut args, "--set VALUE")?));
             }
             Some("--apply") if !positional => {
                 edits_requested = true;
                 let path = args.next().ok_or("Missing JSON patch filename")?;
                 let patch: Value = serde_json::from_reader(File::open(path)?)?;
-                for edit in patch
-                    .as_array()
-                    .ok_or("Patch must be an array of {cell, value} objects")?
-                {
-                    let object = edit
-                        .as_object()
-                        .ok_or("Each patch entry must be an object")?;
-                    if object.len() != 2 {
-                        return Err("Each patch entry must contain only cell and value".into());
-                    }
-                    let cell = edit
-                        .get("cell")
-                        .and_then(Value::as_str)
-                        .ok_or("Patch cell must be an A1-style string")?;
-                    let value = edit
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .ok_or("Patch value must be a string; no automatic type conversion")?;
-                    edits.push((address(cell)?, value.to_owned()));
-                }
+                edits.extend(ops::parse_edits(&patch)?);
             }
             Some("-o" | "--output") if !positional => {
                 output = Some(PathBuf::from(args.next().ok_or("Missing output filename")?))
@@ -274,9 +261,7 @@ pub fn open() -> Result<Option<Sheet>> {
         {
             return Err("Use --sheets by itself with a workbook filename".into());
         }
-        let path = path.ok_or("Missing workbook filename")?;
-        emit(&json!({"source": path, "sheets": Sheet::sheet_names(&path)?}))?;
-        return Ok(None);
+        return Ok(Command::Sheets(path.ok_or("Missing workbook filename")?));
     }
     if edits_requested && !dry_run && output.is_none() {
         return Err("Edits require --dry-run or --output NEW_FILE".into());
@@ -300,168 +285,86 @@ pub fn open() -> Result<Option<Sheet>> {
     {
         return Err("--check cannot be combined with read/edit/save options".into());
     }
-    let started = Instant::now();
-    let mut sheet = Sheet::open_sheet(
-        &path.ok_or("Missing filename")?,
+    Ok(Command::Open(Box::new(Open {
+        path: path.ok_or("Missing filename")?,
         delimiter,
-        selected_sheet.as_deref(),
-    )?;
-    let headless = check
-        || read.is_some()
-        || find.is_some()
-        || !edits.is_empty()
-        || dry_run
-        || output.is_some();
-    if !headless {
+        sheet: selected_sheet,
+        check,
+        read,
+        edits,
+        sort: sort.map(|spec| (spec, header)),
+        find: find.map(|text| Find {
+            query: FindQuery {
+                text,
+                columns: find_columns,
+                exact,
+                ignore_case,
+            },
+            from,
+            limit,
+        }),
+        dry_run,
+        output,
+    })))
+}
+
+/// Execute a headless command, or return the opened sheet for the TUI.
+pub fn run(command: Command) -> Result<Option<Sheet>> {
+    let open = match command {
+        Command::Help => {
+            println!("{HELP}\n{}", super::PLATFORM_HELP);
+            return Ok(None);
+        }
+        Command::Sheets(path) => {
+            emit(&ops::sheets(&path)?.to_json())?;
+            return Ok(None);
+        }
+        Command::Open(open) => *open,
+    };
+    let started = Instant::now();
+    let mut sheet = Sheet::open_sheet(&open.path, open.delimiter, open.sheet.as_deref())?;
+    if !open.headless() {
         return Ok(Some(sheet));
     }
-    // Reads can finish as soon as the requested rows are indexed; edits/saves
-    // wait for the complete scan so an encoding error cannot publish a partial result.
-    // Find validates what it scans itself; with edits or a sort it waits like them.
-    while find.is_none() || !edits.is_empty() || sort.is_some() {
-        let p = sheet.progress();
-        if let Some(error) = p.error {
-            return Err(error.into());
-        }
-        if p.done
-            || (read.is_some_and(|r| p.rows > r.last.0)
-                && edits.is_empty()
-                && output.is_none()
-                && !check
-                && !dry_run
-                && sort.is_none())
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
+    if let Some(wait) = open.wait() {
+        ops::wait_for_index(&sheet, wait)?;
     }
-    let p = sheet.progress();
-    if check {
-        let mut result = json!({"records": p.rows, "bytes": p.total_bytes, "index_bytes": p.index_bytes, "elapsed_seconds": started.elapsed().as_secs_f64()});
-        if let Some(name) = sheet.sheet_name() {
-            result["sheet"] = json!(name);
-            result["format"] = json!(sheet.format());
-            result["source_bytes"] = json!(std::fs::metadata(&sheet.path)?.len());
-        }
-        emit(&result)?;
+    if open.check {
+        emit(&ops::check(&sheet, started)?.to_json())?;
         return Ok(None);
     }
-    if read.is_some_and(|r| r.last.0 >= p.rows) {
-        return Err("Requested range extends beyond the last row".into());
+    if let Some(range) = &open.read {
+        ops::in_bounds(&sheet, range)?;
     }
-    let mut changes = BTreeMap::new();
-    for ((row, col), value) in edits {
-        let records = sheet.window(row, 1)?;
-        let original = records.first().and_then(|r| r.get(col)).unwrap_or("");
-        changes
-            .entry((row, col))
-            .or_insert_with(|| (original.to_owned(), String::new()))
-            .1 = value.clone();
-        sheet.set(row, col, value)?;
-    }
-    let changes: Vec<Value> = changes.into_iter().filter(|(_, (before, after))| before != after)
-        .map(|((row, col), (before, after))| json!({"cell": format!("{}{}", super::column_name(col), row + 1), "before": before, "after": after})).collect();
-    let mut result =
-        json!({"source": sheet.path.to_string_lossy(), "changes": changes, "dry_run": dry_run});
-    if let Some(name) = sheet.sheet_name() {
-        result["sheet"] = json!(name);
-        result["format"] = json!(sheet.format());
-        result["formula_results"] = json!(
-            "existing results are cached; new formulas are calculated when the saved file opens"
-        );
-        result["edit_type"] = json!("text; XLSX values beginning with = are formulas");
-    }
-    if let Some(spec) = &sort {
-        let job = sheet.start_sort(parse_sort(spec)?, header)?;
-        let order = job.result.recv()??;
-        sheet.apply_sort(order)?;
-        result["sort"] = json!({"columns": spec, "header": header, "changes_coordinates": "source", "read_coordinates": "sorted_view"});
-    }
-    if let Some(text) = find {
-        let query = FindQuery {
-            text,
-            columns: find_columns,
-            exact,
-            ignore_case,
-        };
-        let (from, limit) = (from.unwrap_or((0, 0)), limit.unwrap_or(100));
-        let found = sheet.find(&query, from, limit)?;
-        let matches: Vec<Value> = found
-            .matches
-            .iter()
-            .map(|&(address, ref value)| json!({"cell": cell(address), "value": value}))
-            .collect();
-        let next = found.next.map(cell);
-        let columns = query.columns.map(|columns| {
-            columns
-                .into_iter()
-                .map(super::column_name)
-                .collect::<Vec<_>>()
-        });
-        let mut found = json!({
-            "source": result["source"],
-            "find": {"text": query.text, "columns": columns, "exact": exact, "ignore_case": ignore_case, "from": cell(from), "limit": limit},
-            "coordinates": if sort.is_some() { "sorted_view" } else { "source" },
-            "matches": matches,
-            "next": next,
-            "records_scanned": found.records_scanned,
-        });
-        for key in ["sheet", "format", "sort"] {
-            if let Some(value) = result.get(key) {
-                found[key] = value.clone();
-            }
-        }
-        if dry_run {
-            found["changes"] = result["changes"].take();
-            found["dry_run"] = json!(true);
-        }
-        emit(&found)?;
+    let changes = ops::apply_edits(&mut sheet, open.edits)?;
+    let sort = open
+        .sort
+        .map(|(spec, header)| ops::sort(&mut sheet, &spec, header))
+        .transpose()?;
+    if let Some(find) = open.find {
+        let mut found = ops::find(&sheet, find.query, find.from, find.limit)?;
+        found.sort = sort;
+        found.preview = open.dry_run.then_some(changes);
+        emit(&found.to_json())?;
         return Ok(None);
     }
-    if let Some(range) = read {
-        let records = sheet.window(range.first.0, (range.last.0 - range.first.0 + 1) as usize)?;
-        let rows: Vec<Vec<Value>> = records
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                (range.first.1..=range.last.1)
-                    .map(|col| {
-                        sheet
-                            .cell_value(range.first.0 + i as u64, col, row)
-                            .map(|value| json!(value))
-                            .unwrap_or(Value::Null)
-                    })
-                    .collect()
-            })
-            .collect();
-        result["rows"] = json!(rows);
-        if sheet.sheet_name().is_some() {
-            let mut formulas = serde_json::Map::new();
-            for row in range.first.0..=range.last.0 {
-                for col in range.first.1..=range.last.1 {
-                    if let Some(formula) = sheet.formula(row, col) {
-                        formulas.insert(
-                            format!("{}{}", super::column_name(col), row + 1),
-                            json!(formula),
-                        );
-                    }
-                }
-            }
-            result["formulas"] = Value::Object(formulas);
-        }
-        result["range"] = json!(format!(
-            "{}{}:{}{}",
-            super::column_name(range.first.1),
-            range.first.0 + 1,
-            super::column_name(range.last.1),
-            range.last.0 + 1
-        ));
-    }
-    if let Some(output) = output {
-        let saved = sheet.save_as(&output)?.result.recv()??;
-        result["output"] = json!(saved.to_string_lossy());
-    }
-    emit(&result)?;
+    let read = open
+        .read
+        .map(|range| ops::read(&mut sheet, range))
+        .transpose()?;
+    let output = open
+        .output
+        .map(|path| ops::save(&sheet, &path))
+        .transpose()?;
+    let report = ops::Report {
+        source: ops::Source::of(&sheet),
+        changes,
+        dry_run: open.dry_run,
+        sort,
+        read,
+        output,
+    };
+    emit(&report.to_json())?;
     Ok(None)
 }
 
@@ -478,8 +381,8 @@ mod tests {
 
     #[test]
     fn addresses_and_bounded_ranges() {
-        assert_eq!(address("A1").unwrap(), (0, 0));
-        assert_eq!(address("aa65").unwrap(), (64, 26));
+        assert_eq!(a1::parse_cell("A1").unwrap(), (0, 0));
+        assert_eq!(a1::parse_cell("aa65").unwrap(), (64, 26));
         for bad in [
             "",
             "A0",
@@ -490,11 +393,683 @@ mod tests {
             "A18446744073709551616",
             "AAAAAAAAAAAAAAAAAAAA1",
         ] {
-            assert!(address(bad).is_err(), "{bad}");
+            assert!(a1::parse_cell(bad).is_err(), "{bad}");
         }
         for bad in ["B2:A1", "A1:A10001", "A1:ZZZ100", "A1:B2:C3"] {
-            assert!(range(bad).is_err(), "{bad}");
+            assert!(ops::read_range(bad).is_err(), "{bad}");
         }
-        assert_eq!(range("C3").unwrap().first, (2, 2));
+        assert_eq!(ops::read_range("C3").unwrap().first, (2, 2));
+    }
+
+    fn parse_args(list: &[&str]) -> Result<Command> {
+        parse(list.iter().map(OsString::from))
+    }
+
+    fn open(list: &[&str]) -> Open {
+        match parse_args(list).unwrap() {
+            Command::Open(open) => *open,
+            other => panic!("{list:?}: {other:?}"),
+        }
+    }
+
+    fn error(list: &[&str]) -> String {
+        match parse_args(list) {
+            Ok(command) => panic!("{list:?} parsed as {command:?}"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Help")]
+    fn open_helper_refuses_other_commands() {
+        open(&["--help"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "parsed as")]
+    fn error_helper_refuses_success() {
+        error(&["a.csv"]);
+    }
+
+    fn query(text: &str) -> FindQuery {
+        FindQuery {
+            text: text.into(),
+            ..FindQuery::default()
+        }
+    }
+
+    #[test]
+    fn help_and_sheets() {
+        for list in [
+            &[][..],
+            &["-h"],
+            &["--help"],
+            &["a.csv", "--read", "A1", "--help"],
+            &["--help", "--bogus"],
+        ] {
+            assert_eq!(parse_args(list).unwrap(), Command::Help, "{list:?}");
+        }
+        assert_eq!(
+            parse_args(&["--sheets", "book.xlsx"]).unwrap(),
+            Command::Sheets("book.xlsx".into())
+        );
+        // The default delimiter, given explicitly, is no conflict.
+        assert_eq!(
+            parse_args(&["book.xlsx", "--sheets", "-d", ","]).unwrap(),
+            Command::Sheets("book.xlsx".into())
+        );
+        assert_eq!(open(&["--", "--sheets"]).path, PathBuf::from("--sheets"));
+    }
+
+    #[test]
+    fn every_option() {
+        let plain = open(&["a.csv"]);
+        assert_eq!(
+            plain,
+            Open {
+                path: "a.csv".into(),
+                delimiter: b',',
+                sheet: None,
+                check: false,
+                read: None,
+                edits: vec![],
+                sort: None,
+                find: None,
+                dry_run: false,
+                output: None,
+            }
+        );
+        assert!(!plain.headless());
+        let book = open(&["--sheet", "Notes õ", "book.xlsx"]);
+        assert_eq!(book.sheet.as_deref(), Some("Notes õ"));
+        assert!(!book.headless());
+        assert!(open(&["a.csv", "--check"]).check);
+        for (list, delimiter) in [
+            (&["-d", "tab"][..], b'\t'),
+            (&["--delimiter", "\\t"], b'\t'),
+            (&["-d", "\t"], b'\t'),
+            (&["-d", ";"], b';'),
+            (&["-d", "\""], b'"'),
+        ] {
+            let mut all = vec!["a.csv"];
+            all.extend(list);
+            assert_eq!(open(&all).delimiter, delimiter, "{list:?}");
+        }
+        let edited = open(&[
+            "a.csv",
+            "--set",
+            "b2",
+            "x",
+            "--read",
+            "A1:C3",
+            "--set",
+            "B2",
+            "",
+            "--dry-run",
+        ]);
+        assert_eq!(
+            edited.edits,
+            [((1, 1), "x".into()), ((1, 1), String::new())]
+        );
+        assert_eq!(edited.read, Some(a1::parse_range("A1:C3").unwrap()));
+        assert!(edited.dry_run);
+        let saved = open(&["a.csv", "--sort", "B,-D:n", "--no-header", "-o", "out.csv"]);
+        assert_eq!(saved.sort, Some(("B,-D:n".into(), false)));
+        assert_eq!(saved.output, Some("out.csv".into()));
+        assert_eq!(
+            open(&["a.csv", "--sort", "A", "--output", "o.csv"]).sort,
+            Some(("A".into(), true))
+        );
+        let found = open(&[
+            "a.csv",
+            "--find",
+            "x",
+            "--exact",
+            "--ignore-case",
+            "--columns",
+            "c,b,B",
+            "--from",
+            "b2",
+            "--limit",
+            "10000",
+        ]);
+        assert_eq!(
+            found.find,
+            Some(Find {
+                query: FindQuery {
+                    text: "x".into(),
+                    columns: Some(vec![1, 2]),
+                    exact: true,
+                    ignore_case: true,
+                },
+                from: Some((1, 1)),
+                limit: Some(10_000),
+            })
+        );
+        assert_eq!(
+            open(&["a.csv", "--find", "", "--exact"])
+                .find
+                .unwrap()
+                .query,
+            FindQuery {
+                exact: true,
+                ..query("")
+            }
+        );
+        assert_eq!(
+            open(&["a.csv", "--find", "x", "--limit", "1"])
+                .find
+                .unwrap(),
+            Find {
+                query: query("x"),
+                from: None,
+                limit: Some(1),
+            }
+        );
+        // After --, options are file names; before it, a lone - is still an option.
+        assert_eq!(open(&["--", "--check"]).path, PathBuf::from("--check"));
+        assert!(open(&["--check", "--", "-"]).check);
+        assert_eq!(error(&["-", "--check"]), "Unknown option: -");
+        assert_eq!(
+            error(&["--", "a.csv", "--", "b.csv"]),
+            "Open one file at a time"
+        );
+    }
+
+    #[test]
+    fn apply_reads_patch_files_in_argument_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let patch = dir.path().join("patch.json");
+        std::fs::write(
+            &patch,
+            r#"[{"cell":"B2","value":"x"},{"value":"y","cell":"a1"}]"#,
+        )
+        .unwrap();
+        let patch = patch.to_str().unwrap();
+        assert_eq!(
+            open(&["a.csv", "--set", "C3", "z", "--apply", patch, "--dry-run"]).edits,
+            [
+                ((2, 2), "z".into()),
+                ((1, 1), "x".into()),
+                ((0, 0), "y".into())
+            ]
+        );
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "[]").unwrap();
+        let empty = empty.to_str().unwrap();
+        let open_empty = open(&["a.csv", "--apply", empty, "--dry-run"]);
+        assert!(open_empty.edits.is_empty() && open_empty.headless());
+        // An empty patch is still an edit request.
+        assert_eq!(
+            error(&["a.csv", "--apply", empty]),
+            "Edits require --dry-run or --output NEW_FILE"
+        );
+        assert_eq!(
+            error(&["a.csv", "--apply", empty, "--check", "--dry-run"]),
+            "--check cannot be combined with read/edit/save options"
+        );
+        assert_eq!(
+            error(&["a.csv", "--apply", empty, "--check", "-o", "x.csv"]),
+            "--check cannot be combined with read/edit/save options"
+        );
+        assert_eq!(
+            error(&["book.xlsx", "--sheets", "--apply", empty]),
+            "Use --sheets by itself with a workbook filename"
+        );
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "[{").unwrap();
+        assert_eq!(
+            error(&["a.csv", "--apply", broken.to_str().unwrap(), "--bogus"]),
+            "EOF while parsing an object at line 1 column 2"
+        );
+        let missing = dir.path().join("missing.json");
+        assert_eq!(
+            error(&["a.csv", "--apply", missing.to_str().unwrap()]),
+            "No such file or directory (os error 2)"
+        );
+        let invalid = dir.path().join("invalid.json");
+        std::fs::write(&invalid, r#"[{"cell":"A0","value":"x"}]"#).unwrap();
+        assert_eq!(
+            error(&["a.csv", "--apply", invalid.to_str().unwrap()]),
+            "Rows start at 1"
+        );
+    }
+
+    #[test]
+    fn every_rejection() {
+        for (list, message) in [
+            (&["--check"][..], "Missing filename"),
+            (&["a.csv", "b.csv"], "Open one file at a time"),
+            (&["a.csv", "--bogus"], "Unknown option: --bogus"),
+            (&["a.csv", "-x", "--read", "A0"], "Unknown option: -x"),
+            (&["a.csv", "--read", "A0", "--bogus"], "Rows start at 1"),
+            (&["a.csv", "--read", "A0", "--help"], "Rows start at 1"),
+            (&["a.csv", "--read"], "Missing value for --read"),
+            (&["a.csv", "--sheet"], "Missing value for --sheet"),
+            (&["a.csv", "--sort"], "Missing value for --sort"),
+            (&["a.csv", "--find"], "Missing value for --find"),
+            (&["a.csv", "--columns"], "Missing value for --columns"),
+            (&["a.csv", "--from"], "Missing value for --from"),
+            (&["a.csv", "--limit"], "Missing value for --limit"),
+            (&["a.csv", "-d"], "Missing value for --delimiter"),
+            (&["a.csv", "--delimiter"], "Missing value for --delimiter"),
+            (&["a.csv", "--set"], "Missing value for --set CELL"),
+            (&["a.csv", "--set", "B2"], "Missing value for --set VALUE"),
+            (
+                &["a.csv", "--set", "2B", "x"],
+                "Use a cell address such as B7",
+            ),
+            (&["a.csv", "--apply"], "Missing JSON patch filename"),
+            (&["a.csv", "-o"], "Missing output filename"),
+            (&["a.csv", "--output"], "Missing output filename"),
+            (
+                &["a.csv", "-d", "ab"],
+                "Delimiter must be one ASCII character or 'tab'",
+            ),
+            (
+                &["a.csv", "-d", "õ"],
+                "Delimiter must be one ASCII character or 'tab'",
+            ),
+            (
+                &["a.csv", "-d", ""],
+                "Delimiter must be one ASCII character or 'tab'",
+            ),
+            (&["a.csv", "--read", ""], "Use a cell address such as B7"),
+            (
+                &["a.csv", "--read", "$A$1"],
+                "Use a cell address such as B7",
+            ),
+            (
+                &["a.csv", "--read", "A1:B2:C3"],
+                "Use a cell address such as B7",
+            ),
+            (
+                &["a.csv", "--read", "A18446744073709551616"],
+                "number too large to fit in target type",
+            ),
+            (
+                &["a.csv", "--read", "AAAAAAAAAAAAAAAAAAAA1"],
+                "Column address is too large",
+            ),
+            (
+                &["a.csv", "--read", "B2:A1"],
+                "Range must run from top-left to bottom-right",
+            ),
+            (
+                &["a.csv", "--read", "A1:A10001"],
+                "Read at most 100,000 cells and 10,000 rows at a time; request large datasets in chunks",
+            ),
+            (
+                &["a.csv", "--find", "a", "--limit", "0"],
+                "--limit must be a whole number from 1 to 10,000",
+            ),
+            (
+                &["a.csv", "--find", "a", "--limit", "10001"],
+                "--limit must be a whole number from 1 to 10,000",
+            ),
+            (
+                &["a.csv", "--find", "a", "--limit", "-1"],
+                "--limit must be a whole number from 1 to 10,000",
+            ),
+            (
+                &["a.csv", "--find", "a", "--limit", "many"],
+                "--limit must be a whole number from 1 to 10,000",
+            ),
+            (
+                &["a.csv", "--find", "a", "--columns", "A, B"],
+                "Use column letters such as B, not \" B\"",
+            ),
+            (
+                &[
+                    "a.csv",
+                    "--find",
+                    "a",
+                    "--columns",
+                    "ZZZZZZZZZZZZZZZZZZZZZZZZ",
+                ],
+                "Column address is too large",
+            ),
+            (&["a.csv", "--find", "a", "--from", "A0"], "Rows start at 1"),
+            (
+                &["a.csv", "--find", "a", "--from", "B"],
+                "Use a cell address such as B7",
+            ),
+            (
+                &["a.csv", "--exact"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["a.csv", "--ignore-case"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["a.csv", "--columns", "A"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["a.csv", "--from", "A1"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["a.csv", "--limit", "5"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--exact"],
+                "--exact, --ignore-case, --columns, --from and --limit require --find",
+            ),
+            (
+                &["a.csv", "--find", ""],
+                "--find needs text; use --exact --find '' to find empty cells",
+            ),
+            (
+                &["a.csv", "--find", "a", "--read", "A1"],
+                "--find cannot be combined with --read, --output or --check",
+            ),
+            (
+                &["a.csv", "--find", "a", "-o", "o.csv"],
+                "--find cannot be combined with --read, --output or --check",
+            ),
+            (
+                &["a.csv", "--find", "a", "--check"],
+                "--find cannot be combined with --read, --output or --check",
+            ),
+            (
+                &["a.csv", "--find", "a", "--read", "A1", "--sheets"],
+                "--find cannot be combined with --read, --output or --check",
+            ),
+            (&["--sheets"], "Missing workbook filename"),
+            (
+                &["book.xlsx", "--sheets", "--check"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--find", "a"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--read", "A1"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--set", "A1", "x"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--dry-run"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "-o", "x.xlsx"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--sort", "A"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--sheet", "Data"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "--no-header"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["book.xlsx", "--sheets", "-d", ";"],
+                "Use --sheets by itself with a workbook filename",
+            ),
+            (
+                &["a.csv", "--set", "B2", "x"],
+                "Edits require --dry-run or --output NEW_FILE",
+            ),
+            (
+                &["a.csv", "--find", "a", "--set", "A1", "x"],
+                "Edits require --dry-run or --output NEW_FILE",
+            ),
+            (
+                &["a.csv", "--no-header", "--dry-run"],
+                "--no-header requires --sort",
+            ),
+            (
+                &["a.csv", "--find", "a", "--no-header"],
+                "--no-header requires --sort",
+            ),
+            (
+                &["a.csv", "--sort", "A"],
+                "Use --sort with --read, --find, --dry-run or --output; use F6 to sort in the TUI",
+            ),
+            (
+                &["a.csv", "--sort", "A", "--check"],
+                "Use --sort with --read, --find, --dry-run or --output; use F6 to sort in the TUI",
+            ),
+            (
+                &["a.csv", "--sort", "A,A", "--dry-run"],
+                "A sort column may only appear once",
+            ),
+            (
+                &["a.csv", "--find", "a", "--sort", "A,A"],
+                "A sort column may only appear once",
+            ),
+            (
+                &["a.csv", "--sort", "1", "--read", "A1"],
+                "Use column letters, commas, - for descending and :n for numbers; e.g. B,-D:n",
+            ),
+            (
+                &["a.csv", "--sort", "AAAAAAAAAAAAAAAAAAAAAAAA", "--dry-run"],
+                "Column is too large",
+            ),
+            (
+                &["a.csv", "--dry-run", "-o", "new.csv"],
+                "Choose --dry-run or --output, not both",
+            ),
+            (
+                &["a.csv", "--sort", "A,A", "--dry-run", "-o", "new.csv"],
+                "A sort column may only appear once",
+            ),
+            (
+                &["a.csv", "--check", "--dry-run"],
+                "--check cannot be combined with read/edit/save options",
+            ),
+            (
+                &["a.csv", "--check", "--read", "A1"],
+                "--check cannot be combined with read/edit/save options",
+            ),
+            (
+                &["a.csv", "--check", "-o", "new.csv"],
+                "--check cannot be combined with read/edit/save options",
+            ),
+            (
+                &["a.csv", "--check", "--set", "A1", "x", "-o", "n.csv"],
+                "--check cannot be combined with read/edit/save options",
+            ),
+            (
+                &["a.csv", "--check", "--sort", "A", "--read", "A1"],
+                "--check cannot be combined with read/edit/save options",
+            ),
+        ] {
+            assert_eq!(error(list), message, "{list:?}");
+        }
+    }
+
+    #[test]
+    fn non_utf8_values_are_rejected_but_file_names_are_not() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = || OsString::from_vec(vec![0xff]);
+        for option in [
+            "--sheet",
+            "--sort",
+            "--find",
+            "--columns",
+            "--from",
+            "--limit",
+            "--read",
+            "-d",
+            "--delimiter",
+        ] {
+            let list = [OsString::from("a.csv"), option.into(), bad()];
+            let expected = if option == "-d" {
+                "--delimiter"
+            } else {
+                option
+            };
+            assert_eq!(
+                parse(list).unwrap_err().to_string(),
+                format!("{expected} requires UTF-8 text")
+            );
+        }
+        assert_eq!(
+            parse([OsString::from("a.csv"), "--set".into(), bad()])
+                .unwrap_err()
+                .to_string(),
+            "--set CELL requires UTF-8 text"
+        );
+        assert_eq!(
+            parse([OsString::from("a.csv"), "--set".into(), "A1".into(), bad()])
+                .unwrap_err()
+                .to_string(),
+            "--set VALUE requires UTF-8 text"
+        );
+        assert_eq!(
+            parse([bad(), "-o".into(), bad()]).unwrap(),
+            Command::Open(Box::new(Open {
+                path: bad().into(),
+                output: Some(bad().into()),
+                ..open(&["a.csv"])
+            }))
+        );
+    }
+
+    #[test]
+    fn index_waits_follow_the_operations() {
+        let range = |text| Some(a1::parse_range(text).unwrap());
+        let edit = vec![((0, 0), String::new())];
+        let base = open(&["a.csv"]);
+        let find = || {
+            Some(Find {
+                query: query("x"),
+                from: None,
+                limit: None,
+            })
+        };
+        for (open, wait) in [
+            (
+                Open {
+                    read: range("A1:B5"),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::Rows(5)),
+            ),
+            (
+                Open {
+                    read: range("C10"),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::Rows(10)),
+            ),
+            (
+                Open {
+                    read: range("A1"),
+                    dry_run: true,
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    read: range("A1"),
+                    edits: edit.clone(),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    read: range("A1"),
+                    output: Some("o.csv".into()),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    read: range("A1"),
+                    check: true,
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    read: range("A1"),
+                    sort: Some(("A".into(), true)),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    check: true,
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    output: Some("o.csv".into()),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    find: find(),
+                    ..open(&["a.csv"])
+                },
+                None,
+            ),
+            (
+                Open {
+                    find: find(),
+                    dry_run: true,
+                    ..open(&["a.csv"])
+                },
+                None,
+            ),
+            (
+                Open {
+                    find: find(),
+                    edits: edit.clone(),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+            (
+                Open {
+                    find: find(),
+                    sort: Some(("A".into(), true)),
+                    ..open(&["a.csv"])
+                },
+                Some(Wait::All),
+            ),
+        ] {
+            assert!(open.headless(), "{open:?}");
+            assert_eq!(open.wait(), wait, "{open:?}");
+        }
+        assert!(!base.headless());
+        assert!(
+            Open {
+                edits: edit,
+                ..open(&["a.csv"])
+            }
+            .headless()
+        );
+        assert!(
+            !Open {
+                sort: Some(("A".into(), true)),
+                ..base
+            }
+            .headless()
+        );
     }
 }

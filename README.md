@@ -306,14 +306,18 @@ cargo fmt --check
 python3 tests/tui_smoke.py
 python3 tests/workbook_smoke.py target/release/qd
 python3 tests/workbook_tui_smoke.py target/release/qd
+# Coverage gate (needs cargo-llvm-cov): a1.rs, ops.rs and cli.rs fully covered,
+# every other file at or above its recorded baseline.
+python3 scripts/coverage.py
 ```
 
 Tests cover multiline and quoted fields, UTF-8, BOM and line endings, sparse seeks,
 copy/edit/undo round trips, source-change detection, refusal to overwrite existing
-files, CLI patches and dry runs, sorting with stable edit identity, find (modes,
-paging at every page size, partial indexes, edits, sorted views, workbook formulas
-and blanks, source changes mid-scan), mouse navigation,
-and terminal input/rendering. Workbook tests cover sheet selection, source coordinates,
+files, CLI patches and dry runs, golden CLI output (exact stdout, stderr and exit
+status for every option and rejection), the operations layer in-process, sorting
+with stable edit identity, find (modes, paging at every page size, partial indexes,
+edits, sorted views, workbook formulas and blanks, source changes mid-scan), mouse
+navigation, and terminal input/rendering. Workbook tests cover sheet selection, source coordinates,
 formula/merge protection, styles, repeated ODS rows/cells, untouched ZIP members,
 native saves, undo, CSV exports and switching sheets after saving. The original exploration is in
 [the technical and business analysis](docs/quadrille-analysis.md); its broader

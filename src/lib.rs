@@ -14,29 +14,16 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub mod a1;
 mod find;
+pub mod ops;
 mod sort;
 mod workbook;
+pub use a1::{cell_name, column_index, column_name};
 pub use find::{FindQuery, FindResult};
 pub use sort::{SortJob, SortKey, SortOrder, parse_sort};
 
 const STRIDE: u64 = 64;
-/// Zero-based index of column letters, case-insensitive. Unbounded: CSV records may be
-/// wider than XLSX's XFD; workbooks enforce their own column limit on edits.
-pub fn column_index(letters: &str) -> Result<usize> {
-    if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return Err(format!("Use column letters such as B, not {letters:?}").into());
-    }
-    letters
-        .bytes()
-        .try_fold(0usize, |column, b| {
-            column
-                .checked_mul(26)?
-                .checked_add((b.to_ascii_uppercase() - b'A' + 1) as usize)
-        })
-        .map(|column| column - 1)
-        .ok_or_else(|| "Column address is too large".into())
-}
 type Edits = BTreeMap<(u64, usize), String>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -588,18 +575,25 @@ fn copy_bytes(
     Ok(())
 }
 
+/// Wait until indexing is done, successfully or not; unit tests share this one poll.
+#[cfg(test)]
+fn ready(sheet: &Sheet) -> Progress {
+    let start = std::time::Instant::now();
+    while !sheet.progress().done {
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    sheet.progress()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn ready(sheet: &Sheet) {
-        let start = Instant::now();
-        while !sheet.progress().done {
-            assert!(start.elapsed() < Duration::from_secs(10));
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(sheet.progress().error.is_none(), "{:?}", sheet.progress());
+        let progress = super::ready(sheet);
+        assert!(progress.error.is_none(), "{progress:?}");
     }
 
     fn saved(sheet: &Sheet, path: &Path) -> Vec<u8> {
@@ -730,10 +724,7 @@ mod tests {
         assert!(saved(&empty, &dir.path().join("empty.csv")).is_empty());
         fs::write(&source, b"a,b\n\xff,c\n").unwrap();
         let invalid = Sheet::open(&source, b',').unwrap();
-        while !invalid.progress().done {
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(invalid.progress().error.is_some());
+        assert!(super::ready(&invalid).error.is_some());
         assert!(invalid.save_as(&dir.path().join("invalid.csv")).is_err());
         // The final no-clobber publication also protects paths created during a save.
         let destination = dir.path().join("existing.csv");
